@@ -1,0 +1,20 @@
+[project]
+name = "ntulearn-mcp"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Thyme", email = "203131150+tthymept@users.noreply.github.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "playwright>=1.64.1",
+    "requests>=2.34.2",
+]
+
+[project.scripts]
+ntulearn-mcp = "ntulearn_mcp:main"
+
+[build-system]
+requires = ["uv_build>=0.12.11,<0.13.0"]
+build-backend = "uv_build"
