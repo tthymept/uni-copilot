@@ -22,7 +22,7 @@ from urllib.parse import urlparse
 
 import requests
 
-from uni_copilot.ntulearn_mcp.auth.session import LoginRequired, LoginResult, sign_in
+from uni_copilot.ntulearn_mcp.auth.session import LoginRequired, LoginResult, cookie_summary, sign_in
 from uni_copilot.ntulearn_mcp.config import (
     BASE_URL,
     MAX_CONCURRENT,
@@ -149,6 +149,10 @@ class NtuLearnHttp:
             result = self._signer(allow_window=True)
             self._use_cookies(result)
             return result
+
+    # Names and expiry of the cookies we hold (never values), for the login tools.
+    def cookie_summary(self) -> list[str]:
+        return cookie_summary(self._session.cookies)
 
     # For the login_status tool: one users/me call with the cookies we have.
     # True = signed in. Does NOT try to sign in, so it shows the real state.

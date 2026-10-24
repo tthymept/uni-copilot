@@ -54,8 +54,11 @@ def course_url(course_site_id: str) -> str:
 
 # Base for every model below. frozen=True: once created, fields can't be changed,
 # so a result can't be modified by accident after it's built.
+# json_schema_mode_override="serialization": the MCP SDK builds each tool's
+# output schema in "validation" mode, which leaves out computed fields like
+# due_sgt. This makes the schema describe the JSON as it's actually sent.
 class _Model(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, json_schema_mode_override="serialization")
 
 
 # Base for every tool result: the items plus notes about anything that went
