@@ -9,3 +9,8 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Personal data and secrets (never commit)
+.data/
+.env
+data/*

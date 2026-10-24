@@ -2,7 +2,7 @@
 
 A personal academic agent for NTU students. It reads NTULearn (and later other sources), keeps track of what changed, and tells you what to do, in Telegram or Claude Code. It runs on your own computer with your own login, and never stores passwords.
 
-Status as of 23 Oct 2026: planning done, login spike passed, nothing built yet. "Verified" below means checked on my own account (GET only); "Not verified" means designed but not yet tested.
+Status as of 24 Oct 2026: planning done, Phase 0 spike passed (including the 4-hour watch run), Phase 1 endpoints probed, Phase 1 build starting. "Verified" below means checked on my own account (GET only); "Not verified" means designed but not yet tested.
 
 ---
 
@@ -88,10 +88,10 @@ Python MCP server over stdio. Every tool is read-only on NTULearn (`read_only_hi
 - `login()`: opens a visible browser window so I sign in myself (handles MFA).
 
 **Courses**
-- `list_courses(term="current", include_organizations=False)`: current-term course sites grouped by subject code (e.g. IE2108 → lecture site + my tutorial site), with aliases ("DSA" → IE2108).
+- `list_courses(term="current", include_organizations=False)`: current-term course sites grouped by subject code (e.g. IE2108 → lecture site + my tutorial site). Phase 1 matches a course by code or by words in its name; a personal alias file ("DSA" → IE2108) comes later.
 
 **Deadlines and time**
-- `upcoming_deadlines(days=7, course=None)`: calendar API (all event types, ≤16-week windows) ∪ gradebook due dates, deduped by column id, each with submission status (not started / submitted / graded), plus "opens" and "closes" entries from content availability windows.
+- `upcoming_deadlines(days=7, course=None)`: calendar API (all event types, ≤16-week windows) ∪ gradebook due dates, deduped by column id, each with submission status (not started / submitted / graded). Status comes from my gradebook row (`status` only; grade fields are dropped on arrival, never returned or cached). "Opens" and "closes" entries from content availability windows are added in Phase 4.
 - `get_assessment(course, content_id)`: instructions, due date, attempts allowed, time limit, my status.
 
 **News**
@@ -123,7 +123,7 @@ Python MCP server over stdio. Every tool is read-only on NTULearn (`read_only_hi
 - `prep_for_lecture`: this week's slides + transcript summary for one course.
 
 ### 4.3 Internal layout
-- `auth/session.py`: Playwright persistent profile, login, silent re-login, cookie export.
+- `auth/session.py`: Playwright persistent profile, login, silent re-login (hidden browser first, visible window only if I need to sign in), cookie export. Leaves the Ultra page as soon as signed in.
 - `client/http.py`: requests session, base URL, ~1 req/s, max 2 concurrent, retries with backoff on 429/5xx, 401 → silent re-login.
 - `client/*.py`: one module per area (courses, calendar, gradebook, announcements, messages, contents, video).
 - `parsers/`: HTML → text, Ultra document bodies, embedded-video detection, transcript paragraphs.
@@ -278,12 +278,13 @@ Local, never committed: `.auth/profile` (browser profile with login cookies), `.
 
 Each phase ends with something usable.
 
-**Phase 0: spike** (in progress)
-- Done: Playwright login; copied cookies work with plain `requests` for NTULearn and the video site.
-- To do: `spike_session_check.py --watch 240` on a later day (silent sign-in, session lifetime, Cloudflare on the video site).
+**Phase 0: spike** (done)
+- Playwright login; copied cookies work with plain `requests` for NTULearn and the video site.
+- 24 Oct watch run: silent sign-in on a later day; both copied sessions stayed valid for 4 h with a check every 10 min.
 
-**Phase 1: `ntulearn-mcp` core**
+**Phase 1: `ntulearn-mcp` core** (in progress)
 - `login_status`, `login`, `list_courses`, `upcoming_deadlines` (with status), `recent_announcements`, `recent_messages`.
+- Opens/closes windows moved to Phase 4 (need the content tree).
 - Done when: Claude Code answers "what's due this week?" correctly for all my courses.
 
 **Phase 2: event store**
@@ -326,8 +327,10 @@ Each phase ends with something usable.
 
 ## 11. Open questions
 
-- Session: silent sign-in on a later day; how long copied sessions last; whether API calls keep the 3-hour idle session alive; Cloudflare on the video site after ~30 min (Phase 0 watch run).
-- Not yet verified endpoints: Messages, Discussions, Groups, content availability windows, gradebook status for "submitted, not graded".
+- Session: how long copied sessions last with no activity at all (the watch run polled every 10 min, which may have kept them alive); whether silent sign-in works in a headless browser.
+- Not yet verified endpoints: Discussions, Groups, content availability windows.
+- Whether reading `conversations` via the API marks messages as read (I had 0 unread when tested).
+- Past-due gradebook columns with no row for me: missed work, or items with nothing to submit? (2 cases on 24 Oct.)
 - Why IE2106 "Assignment 1" is missing from the calendar.
 - Whether the grades endpoint ever shows unreleased grades.
 - What the other `x-bb-blti-link` items are (other external tools).
@@ -338,7 +341,7 @@ Each phase ends with something usable.
 
 ---
 
-## Appendix A: Verified NTULearn facts (23 Oct 2026, my account, GET only)
+## Appendix A: Verified NTULearn facts (23–24 Oct 2026, my account, GET only)
 
 **Platform and login**
 - NTULearn = Blackboard Learn Ultra at `https://ntulearn.ntu.edu.sg`. Login via Microsoft Entra ID (SAML). "Stay signed in" makes re-login silent in my everyday Chrome.
@@ -347,16 +350,25 @@ Each phase ends with something usable.
 - Login check: `GET /learn/api/v1/users/me` → 200 / 401.
 - Playwright spike: first run needed manual sign-in (37 s); cookies copied into `requests` worked for NTULearn and the video site. Video site sets `__cf_bm` (Cloudflare, ~30 min).
 - Always use the full base URL; relative fetches hit a CDN host and 404.
+- 24 Oct: silent sign-in from the saved profile in 3–4 s on a later day. Watch run: `users/me` and the video-site transcript list both stayed 200 for 4 h (checked every 10 min), even after `__cf_bm` expired.
+- Loading `/ultra/course` makes NTULearn's own page send `PUT /learn/api/v1/utilities/batch` (the web app's request batching, not ours). The login flow leaves the page as soon as `users/me` is 200.
 
 **Courses and terms**
-- Memberships: `/learn/api/v1/users/{userId}/memberships?expand=course&limit=100`. Course has `displayId`, `displayName`, `id`, `isOrganization`, embedded `term`.
-- Terms have names (`26S1`, `25S2`, …) but no dates. Current term = highest `YYS[1|2]` name (with override).
-- `displayId` = `26S1-<CODE>-<SECTION>`. 16 sites this term = 8 subjects.
+- Memberships: `/learn/api/v1/users/{userId}/memberships?expand=course&limit=100`. Response has `paging` (`nextPage`). Course has `displayId`, `displayName`, `id`, `isOrganization`, `isAvailable`, `isClosed`, embedded `term`.
+- Terms have names (`26S1`, `25S2`, `Non-curriculum`, …). The `term` object has `startDate`/`endDate` fields but they are empty (`durationType` CONTINUOUS). Current term = highest `YYS[1|2]` name (with override).
+- `displayId` = `26S1-<CODE>-<SECTION>`. 16 sites this term = 8 subjects, no organizations in 26S1.
 
 **Deadlines**
-- `/learn/api/public/v1/calendars/items?since=&until=` matched NTULearn's Due dates view exactly (34/34). Max range 16 weeks.
+- `/learn/api/public/v1/calendars/items?since=&until=` matched NTULearn's Due dates view exactly (34/34). Max range 16 weeks (17 weeks → 400). Item fields: `calendarId`, `calendarName`, `id`, `type`, `title`, `start`, `end`, `modified`, `dynamicCalendarItemProps`. 24 Oct: all items in ±14 days had `type` = `GradebookColumn`.
 - Calendar item `id` = gradebook column `id`; `end` = `grading.due`.
-- Gradebook columns: `/learn/api/public/v2/courses/{id}/gradebook/columns` (`grading.due`). One item (IE2106 Assignment 1) had a due date but wasn't in the calendar → merge both sources.
+- Gradebook columns: `/learn/api/public/v2/courses/{id}/gradebook/columns` (`grading.due`, `grading.type`, `availability`). 200 on all 16 sites, 88 columns with a due date. One item (IE2106 Assignment 1) had a due date but wasn't in the calendar → merge both sources.
+- Submission status: my gradebook row (`/learn/api/public/v2/courses/{id}/gradebook/users/{userId}`) `status` is `NeedsGrading` (submitted, not marked) or `Graded`; no row = nothing submitted. 24 Oct, future-due columns: 29 no row, 1 NeedsGrading.
+- Attempts also readable by me: `/learn/api/public/v1/courses/{id}/gradebook/columns/{columnId}/attempts` → `id`, `status`, `created`, `exempt`, `userId` (no score). One request per column, so only a fallback.
+
+**Announcements and messages**
+- Announcements: `/learn/api/public/v1/courses/{id}/announcements` → `id`, `title`, `body` (HTML), `created`, `modified`, `availability`, `draft`, `creator`, `position`. The internal `/learn/api/v1/courses/{id}/announcements` returns the same items plus `readStatus`, `startDateRestriction`, `endDateRestriction`.
+- Course Messages: `/learn/api/v1/courses/{id}/conversations` (internal, undocumented) → conversations with `id`, `createdDate`, `updatedDate`, `unreadCount`, `totalCount`, `messages[]` (`body`, `postDate`, `sender`, `senderId`, `isRead`, `type`). `/courses/{id}/messages` → 404; public v1 → 404.
+- `/learn/api/v1/messages/summary`: per-course `numUnreadMessages`, `isCourseMessagesEnabled`, `termName`.
 
 **Content**
 - Children: `/learn/api/public/v1/courses/{courseId}/contents/{contentId}/children`. Attachments and download under `.../contents/{contentId}/attachments[/{id}/download]`.
