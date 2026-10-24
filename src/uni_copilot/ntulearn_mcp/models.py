@@ -96,8 +96,9 @@ class CourseList(_Result):
 # ---------- Deadlines ----------
 
 # not_submitted = no attempt found; submitted = waiting for marking (NeedsGrading);
-# graded = marked; unknown = couldn't read the status.
-SubmissionStatus = Literal["not_submitted", "submitted", "graded", "unknown"]
+# graded = marked; exempt = your prof excused you from it;
+# unknown = couldn't read the status.
+SubmissionStatus = Literal["not_submitted", "submitted", "graded", "exempt", "unknown"]
 
 
 # One thing with a due date. column_id is the gradebook column id, which is also

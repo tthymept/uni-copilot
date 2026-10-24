@@ -293,3 +293,45 @@ Commit:
 git add src/uni_copilot/ntulearn_mcp/client/calendar.py docs/uni-copilot-project-plan.md docs/phase-1-build-log.md
 git commit -m "feat(client): add calendar client with 16-week windows"
 ```
+
+## Step 8: client/gradebook.py
+
+Tested live on all 16 sites: 29 future-due columns, all not submitted yet; calendar and gradebook agree on every item once same-day items are filtered.
+
+**8a. `src/uni_copilot/ntulearn_mcp/client/gradebook.py`** (new). Every function has a comment above it.
+
+- **`DueColumn`**: frozen dataclass (internal, like `CalendarItem`) with `id`, `course_site_id`, `title` and `due`.
+- **`due_columns(http, site_id)`**: one course's gradebook columns, keeping only those with a `grading.due`. Totals and other undated columns are skipped.
+- **`my_statuses(http, site_id, user_id)`**: your gradebook row for one course, turned into `{column id: status}`.
+- **Grades are never read.** `statuses_from_rows` reads only `columnId`, `status` and `exempt` from each row. The grade fields arrive in the response (NTULearn sends them), but no line of code touches them, so they can't be logged, cached or returned. They're thrown away with the response.
+- **Status mapping** (`STATUS_MAP`): `NeedsGrading` → `submitted`, `Graded` → `graded`, `exempt: true` → `exempt`, anything else → `unknown`.
+- **`status_for`**: a column with no entry in your row → `not_submitted`. That's the "no row" rule from the probe.
+- **`_fetch_all`**: GETs a list and follows `paging.nextPage` (one site has 54 columns).
+- `parse_time` is reused from `calendar.py`, so both sources read times the same way.
+
+**8b. `models.py`:** added `exempt` to `SubmissionStatus` ("your prof excused you"), so exempt items won't show as things you still have to do.
+
+Self-test results (verified):
+
+1. 16 sites, 29 future-due columns.
+2. Status, due in future: 29 `not_submitted`. Due in past: 44 `graded`, 13 `submitted`, 2 `not_submitted`.
+3. Next 20 weeks: gradebook 28, calendar 30, both 28, gradebook-only 0, calendar-only 2.
+
+The 2 calendar-only items were due earlier today (11:17 and 15:30 SGT). The calendar API returns items from the start of the `since` day, not the exact time, so step 9 must filter by exact due time. After that, the two sources agree completely.
+
+**8c. Plan doc:** the same-day calendar behaviour and today's status counts added to Appendix A.
+
+Test (PowerShell):
+
+```
+uv run python -m uni_copilot.ntulearn_mcp.client.gradebook
+```
+
+Expect the number of sites and future-due columns, status counts for future and past items (status names only, never grades), and the gradebook vs calendar comparison.
+
+Commit:
+
+```
+git add src/uni_copilot/ntulearn_mcp/client/gradebook.py src/uni_copilot/ntulearn_mcp/models.py docs/uni-copilot-project-plan.md docs/phase-1-build-log.md
+git commit -m "feat(client): add gradebook due dates and submission status"
+```
