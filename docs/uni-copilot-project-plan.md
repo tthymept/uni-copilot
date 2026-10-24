@@ -363,6 +363,7 @@ Each phase ends with something usable.
 **Deadlines**
 - `/learn/api/public/v1/calendars/items?since=&until=` matched NTULearn's Due dates view exactly (34/34). Max range 16 weeks (17 weeks → 400). Item fields: `calendarId`, `calendarName`, `id`, `type`, `title`, `start`, `end`, `modified`, `dynamicCalendarItemProps`. 24 Oct: all items in ±14 days had `type` = `GradebookColumn`.
 - Calendar item `id` = gradebook column `id`; `end` = `grading.due`.
+- 24 Oct: `calendarId` = the course site id (30/30 items in the next 20 weeks); `start` = `end` for every GradebookColumn item. A 20-week range split into 16 + 4 week windows returned 30 items, matching the 30 future-due gradebook columns from the probe.
 - Gradebook columns: `/learn/api/public/v2/courses/{id}/gradebook/columns` (`grading.due`, `grading.type`, `availability`). 200 on all 16 sites, 88 columns with a due date. One item (IE2106 Assignment 1) had a due date but wasn't in the calendar → merge both sources.
 - Submission status: my gradebook row (`/learn/api/public/v2/courses/{id}/gradebook/users/{userId}`) `status` is `NeedsGrading` (submitted, not marked) or `Graded`; no row = nothing submitted. 24 Oct, future-due columns: 29 no row, 1 NeedsGrading.
 - Attempts also readable by me: `/learn/api/public/v1/courses/{id}/gradebook/columns/{columnId}/attempts` → `id`, `status`, `created`, `exempt`, `userId` (no score). One request per column, so only a fallback.

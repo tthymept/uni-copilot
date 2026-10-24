@@ -255,3 +255,41 @@ feat(client): add courses client with term picking and matching
 - record NTU term and organization facts in the plan
 - add phase 1 build log
 ```
+
+## Step 7: client/calendar.py
+
+Tested live: 4 items in the next 7 days, 30 in the next 20 weeks (split into 2 windows), all linked to your course sites.
+
+**7a. `src/uni_copilot/ntulearn_mcp/client/calendar.py`** (new). Every function has a comment above it.
+
+- **`CalendarItem`** is a frozen dataclass, not a pydantic model. It's internal (Claude never sees it directly; step 9 turns it into `Deadline`), so it only needs to hold fields, not validate or produce a schema. It keeps `id`, `type`, `calendar_id`, `title`, `start` and `end`.
+- **`calendar_items(http, since, until)`** is the one function other code calls. It splits the range into windows, fetches each, converts the items, and removes duplicates by `id` (an item sitting exactly on a window boundary could come back twice). Sorted by due time.
+- **`split_windows`** cuts a range into back-to-back pieces of at most 16 weeks, because NTULearn rejects anything longer. 20 weeks → 16 + 4.
+- **`parse_time`** reads NTULearn's ISO times ("...T15:59:00.000Z") as UTC. Python 3.11+ understands the trailing `Z` by itself.
+- **`to_item`** skips a broken item (no id or no time) instead of failing the whole list.
+- **`_fetch_window`** follows `paging.nextPage` in case NTULearn ever pages this list (not seen so far).
+- Why the calendar matters even though the gradebook (step 8) has the same dates: it's 1 request for all courses, versus 1 request per course for the gradebook. Step 9 uses both, because the gradebook catches items the calendar misses.
+
+Self-test results (verified):
+
+1. Next 7 days: 4 items, all `GradebookColumn`.
+2. Next 20 weeks, 2 windows: 30 items, all `GradebookColumn`. Every 7-day item is also in the 20-week list.
+3. `calendar_id` matched one of your course sites for 30/30 items (25 of them are CC0006).
+4. `start == end` for 30/30 items.
+
+**7b. Plan doc:** `calendarId` = course site id and `start = end` added to Appendix A.
+
+Test (PowerShell):
+
+```
+uv run python -m uni_copilot.ntulearn_mcp.client.calendar
+```
+
+Expect item counts for 7 days and 20 weeks (types only, no titles), 30/30 linked to your sites, and a count per subject code.
+
+Commit:
+
+```
+git add src/uni_copilot/ntulearn_mcp/client/calendar.py docs/uni-copilot-project-plan.md docs/phase-1-build-log.md
+git commit -m "feat(client): add calendar client with 16-week windows"
+```
