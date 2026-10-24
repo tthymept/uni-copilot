@@ -2,6 +2,112 @@
 
 What each finished step changed, how to test it, and its commit. Unverified points from each step are collected in the Open items tab. Terms like "jar", "headless" and "semaphore" are explained in the Concepts tab.
 
+## How it all connects (read this first when you come back)
+
+### The layers
+
+```
+You ("any DA3000 announcements?")
+  │
+Claude Code ── picks a tool, fills in its inputs
+  │   MCP protocol: JSON over stdin/stdout (Claude Code starts `uv run ntulearn-mcp`, from .mcp.json)
+  ▼
+server.py ─────────── the door: 6 tools, instructions for Claude, error translation
+  │   normal Python imports and method calls
+  ▼
+client/*.py ───────── the work, one file per area (courses, calendar, gradebook,
+  │                   deadlines, announcements, messages)
+  ├──► client/http.py ──── the only door to NTULearn: GET only, 1 request/s, retries, re-login
+  │        └──► auth/session.py ── signs in with the saved browser profile, hands over cookies
+  ├──► parsers/html.py ─── turns HTML bodies into Markdown + links + files
+  └──► models.py ───────── the shapes every result is packed into (Announcement, Deadline, ...)
+```
+
+Each layer only knows the one below it. `server.py` never touches HTTP. `client/announcements.py` doesn't know MCP exists. `parsers/html.py` doesn't know where its HTML came from.
+
+Restaurant version:
+
+- `server.py` = the waiter and the menu (what you can order, what to say when something's off).
+- `client/` = the kitchen, one station per dish.
+- `parsers/` = prep (washing and cutting raw ingredients).
+- `client/http.py` = the one delivery door to the supplier (NTULearn).
+- `auth/` = the key to that door.
+- `models.py` = the standard plate: every dish leaves the kitchen in that exact shape.
+
+### Words used below
+
+- **Package / module:** a folder with an `__init__.py` is a package; a `.py` file is a module. `uni_copilot.ntulearn_mcp.client.announcements` is the file `src/uni_copilot/ntulearn_mcp/client/announcements.py`. Python finds `src/` because uv installed the project in editable mode (`uni_copilot.pth`).
+- **import:** `from ...client.announcements import AnnouncementsClient` makes a class from another file usable here.
+- **Class:** a blueprint, e.g. `AnnouncementsClient` or `Announcement`.
+- **Object / instance:** one thing built from a class. `_announcements = AnnouncementsClient(_http, _courses)` builds one; "instantiate" means build one.
+- **Method:** a function that belongs to a class, called on an object: `_announcements.recent(...)`.
+- **Function:** a standalone `def`, e.g. `parse_html(...)` or `match_courses(...)`. A **pure function** only uses its inputs (no network, no saved state), so it's easy to test.
+- **Type hint:** a label like `-> AnnouncementList` saying what a function returns. Python itself doesn't enforce it, but the MCP SDK reads it to build the tool's output schema.
+- **Decorator:** the `@mcp.tool(...)` line above a function. It registers that function as a tool when `server.py` is loaded.
+- **Pydantic model:** a class from `models.py` that checks its fields when an object is made and can turn itself into JSON. It also gives the SDK the JSON schema Claude sees.
+
+### One question, end to end: "any DA3000 announcements?"
+
+1. **Claude chooses the tool.** It reads the tool list, picks `recent_announcements` from its name and description, and fills the inputs from your words: `course="DA3000"` (it could also send "DA3" or "da3000"; `courses.pick` handles all of them). You didn't give a time window, so `since_days` keeps its default, 21.
+2. **The tool function runs** (`server.py`):
+
+   ```python
+   @mcp.tool(title="Recent NTULearn announcements", annotations=READ_ONLY)
+   def recent_announcements(since_days=21, course=None) -> AnnouncementList:
+       with _as_tool_errors():
+           return _announcements.recent(since_days=since_days, course=course)
+   ```
+
+   - `_announcements` is an **object** (instance of the **class** `AnnouncementsClient`, imported from `client/announcements.py`).
+   - It was created **once**, when the server started: `_announcements = AnnouncementsClient(_http, _courses)`. Every call reuses it, which is why all tools share one sign-in, one 1 request/s pacer and one course cache.
+   - `.recent(...)` is a **method** on that object. The tool returns **what `.recent()` returns** (an `AnnouncementList`), not the `_announcements` object itself.
+   - `_as_tool_errors()` turns any failure (not signed in, unknown course, NTULearn error) into a `ToolError` message Claude can read.
+3. **The client does the work** (`client/announcements.py`, method `AnnouncementsClient.recent`):
+   - `self._courses.pick("DA3000")` (`client/courses.py`: `pick` → `list_courses` → `match_courses`) → the DA3000 subject and its site(s).
+   - For each site: `self._http.get_all(".../announcements", {"limit": 100})` (`client/http.py`: `get_all` → `get_json` → `_send`). This waits for a free slot, sends the GET with your cookies and, on a 401, calls `sign_in` in `auth/session.py` silently. It returns raw JSON.
+   - For each raw post: `visible_now(...)` (skip drafts and posts you can't see yet), then `to_announcement(...)`, which calls `parse_html(body)` (`parsers/html.py`) → Markdown, links, files.
+   - `to_announcement` builds an `Announcement(...)` **object** from the **class** in `models.py`. Pydantic checks the fields and converts dates to UTC.
+   - `is_recent(...)` keeps posts created or edited in the window, `merge_duplicates(...)` merges cross-posts, and everything is wrapped in `AnnouncementList(...)`.
+4. **Back in `server.py`**, the tool returns that `AnnouncementList`. The SDK turns it into JSON (`model_dump`), which also adds computed fields like `created_sgt`, and sends it to Claude.
+5. **Claude** reads the JSON and writes your answer, in the style that suits where you asked (terminal or, later, Telegram).
+
+Short version:
+
+```
+your words → Claude chooses recent_announcements(course="DA3000")
+→ server.py calls _announcements.recent(21, "DA3000")
+→ client builds Announcement objects (using courses.pick, http.get_all, parse_html, models)
+→ returns AnnouncementList → SDK turns it into JSON → Claude writes your answer
+```
+
+The other tools follow the same pattern: `upcoming_deadlines` → `_deadlines.upcoming(...)` (`client/deadlines.py`, which uses `calendar.py` and `gradebook.py`), `recent_messages` → `_messages.recent(...)`, `list_courses` → `_courses.list_courses(...)`, `login_status` / `login` → `_http`.
+
+### Where the type hint and the real object come from
+
+- `-> AnnouncementList` in `server.py` is only a **label**. The SDK reads it to tell Claude the output's shape (fields such as `title`, `body`, `created_sgt`, and the UNTRUSTED labels), so Claude knows how to read what it receives.
+- The **class** `AnnouncementList` is **defined** in `models.py`.
+- The actual **objects** are **made** in the client (`to_announcement`, then `AnnouncementList(...)` in `recent`).
+- `server.py` only hands them on.
+
+### Why "announcement" appears in three places
+
+1. **`models.Announcement`**: the *shape*. One announcement's fields, no actions.
+2. **`client/announcements.py`, class `AnnouncementsClient`**: the *work*. Fetch every site, filter, parse, merge (~100 lines).
+3. **`server.py`, function `recent_announcements`**: the *door*. ~5 lines that describe the tool for Claude and translate errors.
+
+Why not put the work straight inside the tool?
+
+- **Other code will use the kitchen without a waiter.** In Phase 2, `uni-copilot sync` runs on a schedule with no Claude at all. It will import `AnnouncementsClient` and call `.recent()` directly to fill the database.
+- **Testing.** `merge_duplicates`, `is_recent` and the other pure functions can be tested with made-up data and no MCP (step 15).
+- **Each file changes for one reason.** NTULearn's API changes → only `client/`. Rewording a tool for Claude → only `server.py`. A new field → `models.py`.
+
+This is the layering rule in CLAUDE.md: server → client → parsers → models, auth on its own, all HTTP through `client/http.py`.
+
+### models.py vs server.py
+
+- **`models.py` = "what does the data look like?"** Nouns: `Announcement`, `Deadline`, `Course`, `LoginStatus`. Fields, types and descriptions only; it talks to neither NTULearn nor Claude.
+- **`server.py` = "what can Claude ask for, and how?"** Verbs: the 6 tools, the instructions sent to Claude, error translation, and `main()`, which serves Claude over stdio.
+
 ## Step 0: housekeeping
 
 You'd already committed the folder rename yourself (7e758f0), so this step was only cleanup.
@@ -604,4 +710,97 @@ Commit:
 ```
 git add src/uni_copilot/ntulearn_mcp pyproject.toml uv.lock docs/phase-1-build-log.md
 git commit -m "feat(server): add ntulearn mcp server with six read-only tools"
+```
+
+## Step 14: .mcp.json and .claude/settings.json
+
+Claude Code now sees the server (`claude mcp list` → `ntulearn: uv run ntulearn-mcp - Pending approval`). It's waiting for your one-time approval.
+
+**14a. `.mcp.json`** (new, project root). This is Claude Code's list of MCP servers for this project:
+
+```json
+{ "mcpServers": { "ntulearn": { "type": "stdio", "command": "uv", "args": ["run", "ntulearn-mcp"] } } }
+```
+
+- `"ntulearn"` is the server's name inside Claude Code, so its tools appear as `mcp__ntulearn__<tool>` (e.g. `mcp__ntulearn__upcoming_deadlines`).
+- `"type": "stdio"` means Claude Code starts the program itself and talks through stdin/stdout, exactly what the step 13 end-to-end test did.
+- `uv run ntulearn-mcp` runs the command from step 13 inside the project's `.venv`. Start `claude` from the project folder so `uv` finds `pyproject.toml`.
+- Only `ntulearn` for now; `pilot` joins in Phase 2.
+- **Approval:** a project's `.mcp.json` can start any program, so Claude Code asks you once ("use this MCP server?") before running it. That's the "Pending approval" above.
+
+**14b. `.claude/settings.json`** (new). Project permissions, committed with the repo:
+
+- `permissions.allow` lists the 5 tools that only read: `login_status`, `list_courses`, `upcoming_deadlines`, `recent_announcements`, `recent_messages`. Claude can call these without asking you each time, which matters later when questions come from Telegram and nobody is at the keyboard to click "allow".
+- **`login` is deliberately not allowed**, so Claude Code asks first. It can open a browser window on your PC and wait 5 minutes, and you should know when that happens.
+- The rules name each tool exactly, not `mcp__ntulearn` as a whole. A tool added later is not allowed automatically; you decide each time.
+
+Verified: both files are valid JSON, 5 allow rules, `login` not among them, and Claude Code lists the server.
+
+Test (PowerShell, in the project folder):
+
+```
+claude mcp list
+```
+
+Expect `ntulearn: uv run ntulearn-mcp` (pending approval until you approve it in step 16).
+
+Commit:
+
+```
+git add .mcp.json .claude/settings.json docs/phase-1-build-log.md
+git commit -m "chore(claude): register ntulearn server and allow read-only tools"
+```
+
+## Step 15: tests/
+
+76 offline tests pass in about 1 second. 4 live tests are skipped unless you opt in; they also pass (run once on 24 Oct).
+
+**What a test is here.** A test is a small function named `test_...` that runs a piece of our code on made-up input and checks the result with `assert`. `uv run pytest` finds every `tests/test_*.py` file, runs every `test_` function, and reports passed or failed. Run them after every change: if something you didn't mean to change breaks, a test fails and tells you where.
+
+**15a. `tests/conftest.py`**: shared helpers. pytest loads this file automatically.
+
+- **`FakeHttp`** stands in for `NtuLearnHttp`. It has the same methods (`get_json`, `get_all`) but answers from a dictionary of made-up responses (`routes`), so no network is used. A route can be a dict, a function of the params, or an exception to raise (to test failures). Every requested path is recorded in `calls`.
+- **`RAW_COURSES`**: made-up memberships (XX1001 with a lecture and a tutorial site, YY2002, an unavailable site, an old term, a Non-curriculum site).
+- **`make_courses`** is a pytest *fixture*: a helper that a test gets just by naming it as a parameter. It builds a `CoursesClient` wired to a `FakeHttp`, with extra routes for each test.
+- **`iso(hours)`**: an NTULearn-style time string `hours` from now.
+
+**15b. Test files** (every test has a comment above it saying what it checks):
+
+- `test_courses.py`: term picking (newest, override, none found), `subject_code`, grouping lecture + tutorial sites, `other_sites`, matching (code, site id, words, part of a code), `pick()` errors, and the memberships cache (2 calls → 1 request).
+- `test_calendar_gradebook.py`: `split_windows` (20 weeks → 16 + 4), `parse_time`, `to_item`, status mapping, and **grades never leak** (rows with "A+" and 97.5 in them produce only statuses).
+- `test_deadlines.py`: `since_until`, `merge_items` (union, gradebook-only kept, same-day and other-site items dropped, calendar title wins), `with_status`, the whole `DeadlinesClient` on fake data (including a 403 site turned into a note), and the column cache vs fresh statuses.
+- `test_html.py`: the parser on a synthetic announcement (`tests/fixtures/announcement_sample.html`): Markdown, links, files, script/style dropped, line breaks, nested bold, truncation, `safe_href`, `bb_file_name`. The fixture also contains an "Ignore your previous instructions..." line, which comes through as plain text (data, labelled UNTRUSTED for Claude).
+- `test_announcements_messages.py`: `visible_now` (drafts, Restricted windows), `is_recent` with old-but-edited posts, the 1-minute edit threshold, `merge_duplicates` of cross-posts, the `AnnouncementsClient` (with a failing site), and for messages `sender_name`, `body_html`, `active_since`, `to_message`, and a `MessagesClient` run that proves inactive threads are never fetched.
+- `test_models.py`: UTC storage and SGT text, naive times taken as UTC, only the 5 statuses accepted, frozen results, computed fields in both the JSON and the schema, UNTRUSTED labels, no field named like a grade or score, and the edit threshold.
+- `test_http.py`: the real `NtuLearnHttp` with its network (`requests.Session.get`), sign-in and clock replaced by fakes (`monkeypatch` swaps them for the duration of one test). It checks: no post/put/delete exists; the first call signs in silently; 401 → one re-login; 401 twice → `LoginRequired`; a redirect to Microsoft counts as signed out; 429 waits exactly `Retry-After`; 5xx waits 2, 4, 8 s then fails; network errors are retried; 404 isn't retried and the error never contains the body; non-JSON is an error; `get_all` follows `nextPage`; the pacer spaces calls 1 s apart.
+- `test_server.py`: exactly the 6 tools, all read-only, no grades tool; input limits and defaults (`days` 1–120, default 7); the instructions' safety rules; `days=999` refused; our errors turned into `ToolError`; a structured result; `login_status` answering "not signed in" without an error; and `.claude/settings.json` allowing exactly the 5 read-only tools (not `login`), with `.mcp.json` pointing at `ntulearn-mcp`. If a tool is renamed one day, this test catches the permission rule that no longer matches.
+- `test_live.py`: the opt-in live smoke test. Skipped unless `NTULEARN_LIVE=1`. Real clients, GET only, counts only.
+
+**Two of my first tests were wrong, not the code.** One expected "2" to match both made-up subjects (it doesn't; "0" does). The other mixed the pacer's small waits into the retry waits; a fake clock in `make_http` now makes time move only when something sleeps, so the retry waits are exactly 2, 4, 8.
+
+**15c. `pyproject.toml`**: `[tool.pytest.ini_options] testpaths = ["tests"]`. **`.gitignore`**: `.pytest_cache/`.
+
+Live results (24 Oct, counts only): signed in, term 26S1 with 8 subjects and 16 sites, 4 deadlines in 14 days (all `not_submitted`), 9 announcements and 3 messages in 7 days. 66 s at ~1 request/s.
+
+Test (PowerShell):
+
+```
+uv run pytest
+```
+
+Expect `76 passed, 4 skipped` in about a second. For the live tests (about a minute):
+
+```
+$env:NTULEARN_LIVE='1'; uv run pytest tests/test_live.py -s; Remove-Item Env:NTULEARN_LIVE
+```
+
+Expect 4 passed, with one count line each.
+
+If `uv run` says "failed to remove file ... ntulearn-mcp.exe ... used by another process": a Claude Code window is running the server and `uv` wanted to reinstall the project after `pyproject.toml` changed. Close that window and run again (needed only once), or use `uv run --no-sync pytest`.
+
+Commit:
+
+```
+git add tests pyproject.toml .gitignore docs/phase-1-build-log.md
+git commit -m "test: add offline tests and opt-in live smoke test"
 ```
