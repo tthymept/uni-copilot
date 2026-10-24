@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__ntulearn__login_status",
+      "mcp__ntulearn__list_courses",
+      "mcp__ntulearn__upcoming_deadlines",
+      "mcp__ntulearn__recent_announcements",
+      "mcp__ntulearn__recent_messages"
+    ]
+  }
+}

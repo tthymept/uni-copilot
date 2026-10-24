@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "ntulearn": {
+      "type": "stdio",
+      "command": "uv",
+      "args": ["run", "ntulearn-mcp"]
+    }
+  }
+}
