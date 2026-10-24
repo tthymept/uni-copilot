@@ -1,6 +1,19 @@
 """
 Gradebook: due dates per course, and whether you've submitted each item.
 
+In plain words:
+  Gradebook = "what's due, and have I done it?"
+  - One request PER course site (more expensive than the calendar).
+  - Same due dates as the calendar (same id for the same item), and it
+    catches items the calendar misses.
+  - Your own row gives your status for each item:
+      not_submitted = no entry for you yet
+      submitted     = handed in, not marked yet (NTULearn: NeedsGrading)
+      graded        = marked (NTULearn: Graded)
+      exempt        = your prof excused you
+  - Limit: work handed in OUTSIDE NTULearn (Gradescope, Google Forms via a
+    link) is invisible here, so it can stay not_submitted after you did it.
+
 Verified facts this builds on (plan, Appendix A):
 - GET /learn/api/public/v2/courses/{id}/gradebook/columns lists a course's
   gradebook columns; `grading.due` is the due date. Some items with a due date

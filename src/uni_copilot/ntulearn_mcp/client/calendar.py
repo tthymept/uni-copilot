@@ -1,6 +1,16 @@
 """
 Calendar items: NTULearn's own list of due dates across all your courses.
 
+In plain words:
+  Calendar = "what's due, and when?"
+  - One request covers ALL your courses (cheap).
+  - It has NO status: it can't tell whether you've submitted something.
+  - It can miss items (23 Oct: IE2106 "Assignment 1" was in the gradebook
+    but not in the calendar).
+  - It returns items from the START of the day you ask for, so items due
+    earlier today come back too; the caller filters by exact time.
+  That's why step 9 also uses the gradebook (status + missed items).
+
 Verified facts this builds on (plan, Appendix A):
 - GET /learn/api/public/v1/calendars/items?since=&until= matched NTULearn's
   "Due dates" view exactly (34/34 on 23 Oct).

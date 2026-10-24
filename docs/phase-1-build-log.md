@@ -335,3 +335,53 @@ Commit:
 git add src/uni_copilot/ntulearn_mcp/client/gradebook.py src/uni_copilot/ntulearn_mcp/models.py docs/uni-copilot-project-plan.md docs/phase-1-build-log.md
 git commit -m "feat(client): add gradebook due dates and submission status"
 ```
+
+## Step 9: client/deadlines.py
+
+Tested live: 2 deadlines in the next 7 days, 28 in the next 30, every one found in both the calendar and the gradebook, all `not_submitted`.
+
+**9a. `src/uni_copilot/ntulearn_mcp/client/deadlines.py`** (new). Every function has a comment above it. This is where steps 6–8 come together.
+
+- **`DeadlinesClient.upcoming(days=7, course=None)`** is the main entry point and returns a `DeadlineList`. In order:
+  1. Picks the subjects: all of this term's, or the one matching `course` ("da3000" works). No match, or several matches, raises `ValueError` with the list of codes, which the tool will pass on to Claude.
+  2. Calendar: one call for all courses.
+  3. Gradebook columns for every site in scope.
+  4. `merge_items` makes the union, one entry per id.
+  5. Your status is fetched only for sites that have something due in the window.
+  6. `with_status` builds the `Deadline` models.
+- **Exact time filter (`since_until`).** Only items due after now and no later than now + days are kept. This drops the same-day items the calendar returns (2 today).
+- **When both sources have an item**, the calendar's due time and title win, because the calendar is what NTULearn's own Due dates page shows you. `sources` records where each item was found (`calendar`, `gradebook`, or both).
+- **`Merged`** is a dataclass but not frozen, unlike `CalendarItem`, because its `sources` list grows when the gradebook has the same id.
+- **Partial failures become notes, not errors.** If one site's gradebook or status call fails (say a 403), the other courses still come back, that site's items show `unknown`, and a note explains. A sign-in failure is not swallowed; it goes up so Claude can tell you to log in.
+- **Caching.** At ~1 request/s a cold call is about 20 s (16 gradebook calls plus a few status calls). Gradebook columns rarely change, so they're kept in memory for 30 min (`COLUMNS_TTL_S`). Statuses are always fetched fresh, because they change the moment you submit. A second call took 6 s.
+- **Items from other sites.** Calendar items from sites outside this term's courses (e.g. Non-curriculum training) are left out, with a note saying how many. There were none today.
+
+Self-test results (verified):
+
+1. Next 7 days: 2 deadlines (DA3000 Sun 25 Oct 23:59, IE2108 Mon 26 Oct 13:00), both `not_submitted`, both from calendar + gradebook. Cold call: 20 s.
+2. Next 30 days: 28 deadlines in 6 s (columns cached). All `not_submitted`, all from both sources. Per course: CC0006 24, DA3000 1, IE2108 1, ML0004 1, CL0105 1.
+3. `course='da3000'` → 1 deadline, all DA3000.
+4. `course='zzzz'` → "No course matches 'zzzz'. This term: CC0006, CL0105, ...".
+
+An offline check with made-up items also passed: an item in both sources merged into one, a gradebook-only item was kept, an item due earlier today was dropped, and statuses mapped correctly.
+
+**9b. "In plain words" blocks** added at the top of `calendar.py`, `gradebook.py` and `deadlines.py`:
+
+- Calendar = "what's due, and when?": one request for all courses, no status, can miss items, returns items from the start of the day.
+- Gradebook = "what's due, and have I done it?": one request per site, same due dates plus your status (`not_submitted` / `submitted` / `graded` / `exempt`), catches what the calendar misses.
+- Deadlines = the union of both, with the status always from the gradebook, plus what neither source catches (work submitted outside NTULearn, deadlines only in announcement text, calendar items that aren't gradebook columns).
+
+Test (PowerShell):
+
+```
+uv run python -m uni_copilot.ntulearn_mcp.client.deadlines
+```
+
+Expect your deadlines for the next 7 days (course code, due time in SGT, status, sources; no titles), a 30-day summary that's faster thanks to the cache, a single-course check, and the "No course matches" message. Compare the 7-day list with NTULearn's Due dates page: it should match.
+
+Commit:
+
+```
+git add src/uni_copilot/ntulearn_mcp/client/deadlines.py src/uni_copilot/ntulearn_mcp/client/calendar.py src/uni_copilot/ntulearn_mcp/client/gradebook.py docs/phase-1-build-log.md
+git commit -m "feat(client): merge calendar and gradebook into upcoming deadlines"
+```
