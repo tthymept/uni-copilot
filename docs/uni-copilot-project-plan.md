@@ -357,7 +357,8 @@ Each phase ends with something usable.
 **Courses and terms**
 - Memberships: `/learn/api/v1/users/{userId}/memberships?expand=course&limit=100`. Response has `paging` (`nextPage`). Course has `displayId`, `displayName`, `id`, `isOrganization`, `isAvailable`, `isClosed`, embedded `term`.
 - Terms have names (`26S1`, `25S2`, `Non-curriculum`, …). The `term` object has `startDate`/`endDate` fields but they are empty (`durationType` CONTINUOUS). Current term = highest `YYS[1|2]` name (with override).
-- `displayId` = `26S1-<CODE>-<SECTION>`. 16 sites this term = 8 subjects, no organizations in 26S1.
+- `displayId` = `26S1-<CODE>-<SECTION>`. 16 sites this term = 8 subjects (1–3 sites each), no organizations in 26S1.
+- NTU marks no site as `isOrganization` (0 of 57). Extra sites sit in a term named `Non-curriculum` (18 sites, 14 available, assorted `displayId` formats); 1 site has no term. Course names are all upper case.
 
 **Deadlines**
 - `/learn/api/public/v1/calendars/items?since=&until=` matched NTULearn's Due dates view exactly (34/34). Max range 16 weeks (17 weeks → 400). Item fields: `calendarId`, `calendarName`, `id`, `type`, `title`, `start`, `end`, `modified`, `dynamicCalendarItemProps`. 24 Oct: all items in ±14 days had `type` = `GradebookColumn`.
