@@ -1,7 +1,7 @@
 [project]
-name = "ntulearn-mcp"
+name = "uni-copilot"
 version = "0.1.0"
-description = "Add your description here"
+description = "Personal academic agent for NTU students: NTULearn deadlines, announcements and reminders via Claude Code and Telegram"
 readme = "README.md"
 authors = [
     { name = "Thyme", email = "203131150+tthymept@users.noreply.github.com" }
@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [project.scripts]
-ntulearn-mcp = "ntulearn_mcp:main"
+uni-copilot = "uni_copilot:main"
 
 [build-system]
 requires = ["uv_build>=0.12.11,<0.13.0"]
