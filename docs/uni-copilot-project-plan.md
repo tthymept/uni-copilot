@@ -2,7 +2,7 @@
 
 A personal academic agent for NTU students. It reads NTULearn (and later other sources), keeps track of what changed, and tells you what to do, in Telegram or Claude Code. It runs on your own computer with your own login, and never stores passwords.
 
-Status as of 24 Oct 2026: planning done, Phase 0 spike passed (including the 4-hour watch run), Phase 1 endpoints probed, Phase 1 build starting. "Verified" below means checked on my own account (GET only); "Not verified" means designed but not yet tested.
+Status as of 24 Oct 2026: Phase 0 spike passed; **Phase 1 (`ntulearn-mcp` core) done**: 6 read-only tools working in Claude Code, 78 offline tests + 4 opt-in live tests. Build details: `docs/phase-1-build-log.md`. Next: Phase 2 (event store). "Verified" below means checked on my own account (GET only); "Not verified" means designed but not yet tested.
 
 ---
 
@@ -83,20 +83,22 @@ Python MCP server over stdio. Every tool is read-only on NTULearn (`read_only_hi
 
 ### 4.1 Tools
 
+Phase 1 tools are built as described below (✓). Every `course` argument accepts a code ("IE2108"), part of a code ("DA3") or words from the name; 0 or 2+ matches return an error listing this term's codes. Every result has a `notes` list for courses that couldn't be read.
+
 **Session**
-- `login_status()`: is there a working session (`users/me` → 200)?
-- `login()`: opens a visible browser window so I sign in myself (handles MFA).
+- ✓ `login_status()`: one `users/me` call; signs in silently (hidden browser) if needed, never opens a window. Returns `signed_in`, a detail, and cookie names + expiry.
+- ✓ `login()`: hidden browser first; if a real sign-in is needed, opens a visible window and waits up to 5 min (handles MFA). Not pre-allowed in `.claude/settings.json`, so Claude Code asks first.
 
 **Courses**
-- `list_courses(term="current", include_organizations=False)`: current-term course sites grouped by subject code (e.g. IE2108 → lecture site + my tutorial site). Phase 1 matches a course by code or by words in its name; a personal alias file ("DSA" → IE2108) comes later.
+- ✓ `list_courses(term=None, include_organizations=False)`: current-term subjects, each with its sites (e.g. IE2108 → lecture site + my tutorial site). `include_organizations` also lists Non-curriculum sites (NTU marks nothing as an organization). A personal alias file ("DSA" → IE2108) comes later.
 
 **Deadlines and time**
-- `upcoming_deadlines(days=7, course=None)`: calendar API (all event types, ≤16-week windows) ∪ gradebook due dates, deduped by column id, each with submission status (not started / submitted / graded). Status comes from my gradebook row (`status` only; grade fields are dropped on arrival, never returned or cached). "Opens" and "closes" entries from content availability windows are added in Phase 4.
-- `get_assessment(course, content_id)`: instructions, due date, attempts allowed, time limit, my status.
+- ✓ `upcoming_deadlines(days=7, course=None)` (`days` 1–120): calendar API (≤16-week windows) ∪ gradebook due dates, deduped by column id, filtered by exact due time, soonest first. Each item: title, `due_at` (UTC) + `due_sgt`, `status` (not_submitted / submitted / graded / exempt / unknown), `sources`, course link. Status comes from my gradebook row (`status` only; grade fields are never read). Gradebook columns cached 30 min; statuses always fresh. "Opens" and "closes" entries from content availability windows are added in Phase 4.
+- `get_assessment(course, content_id)`: instructions, due date, attempts allowed, time limit, my status. (Phase 4)
 
 **News**
-- `recent_announcements(since_days=21, course=None)`: includes edited ones; duplicates across lecture/tutorial sites merged.
-- `recent_messages(since_days=14, course=None)`: course Messages (some profs use these instead of announcements).
+- ✓ `recent_announcements(since_days=21, course=None)` (1–180): posted or edited in the window, newest first; cross-posts merged; body as light Markdown plus `links` and `files`; `edited` + `modified_sgt`.
+- ✓ `recent_messages(since_days=14, course=None)` (1–180): course Messages (some profs use these instead of announcements); only threads active in the window are fetched in full; `sender_name`, `sent_by_me`, `is_read`, Markdown body plus `links` and `files`.
 
 **Content**
 - `list_course_content(course, folder_id=None)`: one folder level; locked items marked "locked".
@@ -124,11 +126,12 @@ Python MCP server over stdio. Every tool is read-only on NTULearn (`read_only_hi
 
 ### 4.3 Internal layout
 - `auth/session.py`: Playwright persistent profile, login, silent re-login (hidden browser first, visible window only if I need to sign in), cookie export. Leaves the Ultra page as soon as signed in.
-- `client/http.py`: requests session, base URL, ~1 req/s, max 2 concurrent, retries with backoff on 429/5xx, 401 → silent re-login.
-- `client/*.py`: one module per area (courses, calendar, gradebook, announcements, messages, contents, video).
-- `parsers/`: HTML → text, Ultra document bodies, embedded-video detection, transcript paragraphs.
-- `cache.py`: content tree and file text cache with expiry.
-- `models.py`: typed results.
+- `client/http.py`: requests session, base URL, ~1 req/s, max 2 concurrent, retries with backoff on 429/5xx, 401 → silent re-login. GET only: `get_json` and `get_all` (follows paging) are its only request methods.
+- `client/*.py`: one module per area. Built: courses, calendar, gradebook, deadlines (merges calendar + gradebook), announcements, messages. Later: contents, video.
+- `parsers/`: built: `html.py` (HTML → light Markdown + links + files). Later: Ultra document bodies, embedded-video detection, transcript paragraphs.
+- `cache.py`: content tree and file text cache with expiry (Phase 4). Phase 1 only has small in-memory caches inside the clients (memberships 1 h, gradebook columns 30 min).
+- `models.py`: typed results (pydantic), times in UTC with SGT text fields, UNTRUSTED labels on other people's text, no grade fields.
+- `server.py`: the MCP server and tools; `ntulearn-mcp` command. `.mcp.json` registers it with Claude Code; `.claude/settings.json` pre-allows the read-only tools except `login`.
 
 ---
 
@@ -282,10 +285,10 @@ Each phase ends with something usable.
 - Playwright login; copied cookies work with plain `requests` for NTULearn and the video site.
 - 24 Oct watch run: silent sign-in on a later day; both copied sessions stayed valid for 4 h with a check every 10 min.
 
-**Phase 1: `ntulearn-mcp` core** (in progress)
+**Phase 1: `ntulearn-mcp` core** (done 24 Oct 2026)
 - `login_status`, `login`, `list_courses`, `upcoming_deadlines` (with status), `recent_announcements`, `recent_messages`.
 - Opens/closes windows moved to Phase 4 (need the content tree).
-- Done when: Claude Code answers "what's due this week?" correctly for all my courses.
+- Done when: Claude Code answers "what's due this week?" correctly for all my courses. ✓ Checked against NTULearn on 24 Oct; one bug found and fixed (message senders showed as "GIVEN_NAME").
 
 **Phase 2: event store**
 - SQLite schema, `uni-copilot sync`, change detection, `pilot-mcp` (`list_events`, `whats_new`), `weekly_actions` prompt.
@@ -331,6 +334,9 @@ Each phase ends with something usable.
 - Not yet verified endpoints: Discussions, Groups, content availability windows.
 - Whether reading `conversations` via the API marks messages as read (I had 0 unread when tested).
 - Past-due gradebook columns with no row for me: missed work, or items with nothing to submit? (2 cases on 24 Oct.)
+- The visible-window `login()` path: same code as the spike's first sign-in, but never needed since the build (silent sign-in always worked). Test it when the Microsoft "stay signed in" cookie expires.
+- Whether NTULearn sends students announcements that are drafts or outside their Restricted window (`visible_now` filters them anyway).
+- Calendar items that aren't gradebook columns (course events, personal entries): none seen yet; they would show status `unknown`.
 - Why IE2106 "Assignment 1" is missing from the calendar.
 - Whether the grades endpoint ever shows unreleased grades.
 - What the other `x-bb-blti-link` items are (other external tools).
@@ -377,7 +383,7 @@ Each phase ends with something usable.
 - Course Messages: `/learn/api/v1/courses/{id}/conversations` (internal, undocumented) → conversations with `id`, `createdDate`, `updatedDate`, `unreadCount`, `totalCount`, `messages[]` (`body`, `postDate`, `sender`, `senderId`, `isRead`, `type`). `/courses/{id}/messages` → 404; public v1 → 404.
 - `/learn/api/v1/messages/summary`: per-course `numUnreadMessages`, `isCourseMessagesEnabled`, `termName`.
 - 24 Oct (16 sites): `conversations` returned 200 everywhere, 9 conversations, no paging. Each conversation's `messages` holds only the newest message (a preview); `totalCount` is the thread length (25 in total). Full thread: `GET /learn/api/v1/courses/{id}/conversations/{conversationId}/messages` (list with `paging`, oldest first); `GET .../conversations/{conversationId}` also returns the full `messages`. `recipientCategory` is a list.
-- Message `body` is an object: `rawText`, `displayText` (both HTML; same text after parsing for 25/25), `webLocation`, `fileLocation`. `sender`: `id`, `userName`, `givenName`, `familyName`, `preferredDisplayName`, `title`, `avatar`. `type`: `NORMAL`. Attachments use the same `data-bbfile` markup as announcements.
+- Message `body` is an object: `rawText`, `displayText` (both HTML; same text after parsing for 25/25), `webLocation`, `fileLocation`. `sender`: `id`, `userName`, `givenName`, `familyName`, `preferredDisplayName`, `title`, `avatar`. `preferredDisplayName` is a display setting, not a name (`GIVEN_NAME` on all 25 messages and on `users/me`); the name is `givenName` + `familyName` (filled on 25/25, 6 distinct senders). `type`: `NORMAL`. Attachments use the same `data-bbfile` markup as announcements.
 
 **Content**
 - Children: `/learn/api/public/v1/courses/{courseId}/contents/{contentId}/children`. Attachments and download under `.../contents/{contentId}/attachments[/{id}/download]`.

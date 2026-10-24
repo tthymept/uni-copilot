@@ -90,11 +90,27 @@ def test_announcements_client(make_courses):
 
 # ---------- Messages ----------
 
-# Preferred name first, else "given family"; no sender object -> None.
+# The name is "given family"; no sender object or no name parts -> None.
 def test_sender_name():
-    assert sender_name({"preferredDisplayName": "Prof X", "givenName": "A", "familyName": "B"}) == "Prof X"
     assert sender_name({"givenName": "A", "familyName": "B"}) == "A B"
+    assert sender_name({"givenName": "A"}) == "A"
     assert sender_name(None) is None and sender_name({}) is None
+
+
+# Regression: preferredDisplayName is a SETTING ("GIVEN_NAME"), never the name.
+# This is the bug that showed every sender as "GIVEN_NAME".
+def test_sender_name_ignores_display_setting():
+    sender = {"preferredDisplayName": "GIVEN_NAME", "givenName": "A", "familyName": "B", "title": "Dr"}
+    assert sender_name(sender) == "A B"
+    assert sender_name({"preferredDisplayName": "GIVEN_NAME"}) is None
+
+
+# The setting picks otherName (e.g. an English name) only when that field is filled.
+def test_sender_name_other_name():
+    base = {"givenName": "A", "familyName": "B", "otherName": "Al"}
+    assert sender_name({**base, "preferredDisplayName": "OTHER_NAME"}) == "Al B"
+    assert sender_name({**base, "preferredDisplayName": "BOTH"}) == "A (Al) B"
+    assert sender_name({"givenName": "A", "familyName": "B", "preferredDisplayName": "OTHER_NAME"}) == "A B"
 
 
 # displayText first, then rawText; a plain string body also works.

@@ -6,8 +6,8 @@ The full plan, architecture, roadmap and verified API facts are in `docs/uni-cop
 
 ## Environment
 
-- Windows + PowerShell. Python ≥ 3.10 managed with `uv` (`uv add`, `uv run`, `uv sync`).
-- MCP Python SDK `mcp>=2.3,<3`: `from mcp.server import MCPServer`, `from mcp.types import ToolAnnotations`, `mcp.run(transport="stdio")`. v2 renamed FastMCP to MCPServer; don't use old `mcp.server.fastmcp` examples.
+- Windows + PowerShell. Python ≥ 3.12 (as in `pyproject.toml`) managed with `uv` (`uv add`, `uv run`, `uv sync`).
+- MCP Python SDK `mcp>=2.3,<3`: `from mcp.server import MCPServer`, `from mcp.types import ToolAnnotations`, `from mcp.server.mcpserver.exceptions import ToolError`, `mcp.run(transport="stdio")`. v2 renamed FastMCP to MCPServer; don't use old `mcp.server.fastmcp` examples. Plain `def` tools run in a worker thread, so blocking code (requests, sync Playwright) is fine. `mcp dev` needs the dev dependency `mcp[cli]`.
 - Playwright Chromium for login only; all data calls use `requests` with copied cookies.
 
 ## Commands
@@ -16,7 +16,11 @@ The full plan, architecture, roadmap and verified API facts are in `docs/uni-cop
 - Run servers: `uv run ntulearn-mcp`, `uv run pilot-mcp`
 - Inspect tools: `uv run mcp dev src/uni_copilot/ntulearn_mcp/server.py`
 - CLI: `uv run uni-copilot sync | remind | notify "<text>"`
-- Tests: `uv run pytest`
+- Server self-test (lists and calls tools in-process): `uv run python -m uni_copilot.ntulearn_mcp.server --self-test`
+- Module self-tests (live, GET only, counts only): `uv run python -m uni_copilot.ntulearn_mcp.client.<module>` (e.g. `deadlines`, `announcements`, `messages`), and `...auth.session`, `...parsers.html`, `...models` (offline)
+- Tests: `uv run pytest` (offline, synthetic data)
+- Live smoke tests (opt-in, counts only): `$env:NTULEARN_LIVE='1'; uv run pytest tests/test_live.py -s; Remove-Item Env:NTULEARN_LIVE`
+- If `uv run` fails with "ntulearn-mcp.exe ... used by another process", a Claude Code session is running the server; close it once or use `uv run --no-sync ...`.
 - Login spike: `uv run python spike_session_check.py [--watch 240]`
 
 ## Architecture rules

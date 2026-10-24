@@ -18,7 +18,8 @@ Verified facts this builds on (plan, Appendix A; checked 24 Oct):
 - GET /learn/api/v1/courses/{id}/conversations/{conversationId}/messages:
   the full thread, oldest first, paged like other lists.
 - Message: `id`, `postDate`, `isRead`, `senderId`, `sender` (givenName,
-  familyName, preferredDisplayName, ...), `type` (NORMAL), and `body` as an
+  familyName, title, userName, and preferredDisplayName, which is a display
+  SETTING like "GIVEN_NAME", not a name), `type` (NORMAL), and `body` as an
   object whose `displayText` and `rawText` are both HTML. They gave the same
   text after parsing for all 25 messages; displayText is used.
 
@@ -104,15 +105,25 @@ def active_since(conv: dict[str, Any], since: datetime) -> bool:
     return newest is not None and newest >= since
 
 
-# The sender's display name: preferred name if set, else "given family".
-# None if the sender object is missing (e.g. a deleted user).
+# The sender's name: "given family". None if the sender object is missing
+# (e.g. a deleted user) or has no name parts.
+# Careful: `preferredDisplayName` is NOT a name. It's a Blackboard setting
+# saying WHICH name to show (verified 24 Oct: "GIVEN_NAME" on all 25 messages).
+# An earlier version returned it as the name, so every sender showed up as
+# "GIVEN_NAME". It's only used here to pick otherName (e.g. an English name)
+# when the setting asks for it and the field is filled in (never seen yet).
 def sender_name(sender: Any) -> str | None:
     if not isinstance(sender, dict):
         return None
-    name = (sender.get("preferredDisplayName") or "").strip()
-    if not name:
-        name = f"{sender.get('givenName') or ''} {sender.get('familyName') or ''}".strip()
-    return name or None
+    given = (sender.get("givenName") or "").strip()
+    family = (sender.get("familyName") or "").strip()
+    other = (sender.get("otherName") or "").strip()
+    mode = (sender.get("preferredDisplayName") or "").strip().upper()
+    if other and mode == "OTHER_NAME":
+        given = other
+    elif other and mode == "BOTH":
+        given = f"{given} ({other})" if given else other
+    return f"{given} {family}".strip() or None
 
 
 # The HTML of a message body: displayText (what the page shows), else rawText.
@@ -176,8 +187,10 @@ def _main() -> None:
     ms = r.messages
     print(f"2) last {MAX_DAYS} days: {len(ms)} messages in {len({m.conversation_id for m in ms})} conversations "
           f"({time.monotonic() - t0:.0f} s), per course {dict(Counter(m.course_code for m in ms))}")
+    # Distinct names, not just "has a name": the GIVEN_NAME bug passed a has-a-name check.
     print(f"   by me: {sum(m.sent_by_me for m in ms)}, unread: {sum(m.is_read is False for m in ms)}, "
-          f"with sender name: {sum(m.sender_name is not None for m in ms)}, with links: {sum(bool(m.links) for m in ms)}, "
+          f"with sender name: {sum(m.sender_name is not None for m in ms)}, "
+          f"distinct sender names: {len({m.sender_name for m in ms})}, with links: {sum(bool(m.links) for m in ms)}, "
           f"with files: {sum(bool(m.files) for m in ms)}, empty body: {sum(not m.body for m in ms)}")
     try:
         client.recent(since_days=7, course="zzzz")

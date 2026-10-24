@@ -1,6 +1,6 @@
 # Phase 1 build log
 
-What each finished step changed, how to test it, and its commit. Unverified points from each step are collected in the Open items tab. Terms like "jar", "headless" and "semaphore" are explained in the Concepts tab.
+What each finished step changed, how to test it, and its commit. Unverified points from each step are collected in the "Open items" section at the bottom. Terms like "jar", "headless" and "semaphore" are explained in the "Concepts" section at the bottom. "Changes from the original Phase 1 plan" is just above them.
 
 ## How it all connects (read this first when you come back)
 
@@ -154,7 +154,7 @@ Verified inside the installed SDK:
 
 - `from mcp.server import MCPServer` and `from mcp.types import ToolAnnotations` both work. `ToolAnnotations` has `read_only_hint`, `destructive_hint`, `idempotent_hint` and `open_world_hint`.
 - `ToolError` lives at `mcp.server.mcpserver.exceptions`.
-- A tool written as a normal `def` (not `async def`) runs in a worker thread automatically. See "Changes from the original Phase 1 plan" in the overview tab.
+- A tool written as a normal `def` (not `async def`) runs in a worker thread automatically. See "Changes from the original Phase 1 plan" near the bottom.
 
 Test (PowerShell, in the project folder):
 
@@ -804,3 +804,165 @@ Commit:
 git add tests pyproject.toml .gitignore docs/phase-1-build-log.md
 git commit -m "test: add offline tests and opt-in live smoke test"
 ```
+
+## Bug fix: message senders all showed as "GIVEN_NAME"
+
+Found by you while trying the tools in Claude Code: every message, including students' messages, came back with `sender_name` = "GIVEN_NAME".
+
+**Cause.** In Blackboard, `sender.preferredDisplayName` is not a name. It's a **setting** saying *which* name to display (values like `GIVEN_NAME`). `sender_name()` in `client/messages.py` assumed it held the name and used it first, so every sender got the setting's value. Probe (counts and setting values only): `GIVEN_NAME` on all 25 messages and on your own `users/me`; `givenName` and `familyName` filled on 25/25; 6 distinct senders.
+
+**Why the tests missed it.** Step 12's self-test only checked that a name *existed* (`has_sender=True`), and step 15's offline test was written with the same wrong assumption (it expected `preferredDisplayName` to win). A check of *what* the value says would have caught it. Lesson: test values, not just presence.
+
+**Fix (`client/messages.py`):**
+
+- `sender_name` now returns "givenName familyName".
+- `preferredDisplayName` is only used as the setting it is: with `OTHER_NAME` or `BOTH` it brings in `otherName` (e.g. an English name), and only if that field is filled. That has never been seen yet.
+- The top-of-file notes now say `preferredDisplayName` is a setting.
+- The self-test also prints the number of **distinct** sender names, so this kind of bug shows up next time.
+
+**Tests (`tests/test_announcements_messages.py`):**
+
+- `test_sender_name` corrected.
+- New `test_sender_name_ignores_display_setting`: the regression test for this exact bug.
+- New `test_sender_name_other_name`.
+- Result: 78 passed, 4 skipped.
+
+**Live check (counts only):** 25 messages, 0 names that look like a setting, 0 missing, 6 distinct names for 6 distinct senders.
+
+**Plan doc:** Appendix A now says `preferredDisplayName` is a display setting, not a name.
+
+**Note:** the Claude Code window you tested in is still running the old server code (it loaded `server.py` when it started). Restart that session, or run `/mcp` there and reconnect `ntulearn`, to pick up the fix.
+
+Test (PowerShell):
+
+```
+uv run pytest
+uv run python -m uni_copilot.ntulearn_mcp.client.messages
+```
+
+Expect 78 passed, 4 skipped; and in the self-test summary, "distinct sender names" greater than 1 (6 today).
+
+Commit: together with step 16, see the commit at the end of the Step 16 section.
+
+## Step 16: final check and wrap-up
+
+**The "done" test (by you, in Claude Code).** Phase 1 is done when Claude Code answers "what's due this week?" correctly for all your courses. You checked the tools against NTULearn on 24 Oct: everything matched except message senders, which all showed as "GIVEN_NAME". That bug is fixed (section above). **Phase 1 is done.**
+
+**16a. `docs/uni-copilot-project-plan.md`:**
+
+- Status line: Phase 1 done, pointing to this log.
+- Section 4.1: the 6 tools described as built (✓): the `course` argument rules, `notes`, `days` limits, the 5 statuses, Markdown bodies with `links`/`files`, `modified_sgt`, `sender_name`/`sent_by_me`, and `login` not pre-allowed.
+- Section 4.3: what's built (`deadlines.py`, `parsers/html.py`, `server.py`, `.mcp.json`, `.claude/settings.json`), and that `cache.py` waits for Phase 4 (Phase 1 only has small in-memory caches).
+- Roadmap: Phase 1 marked done (24 Oct), with the check and the bug fix.
+- Open questions: added the untested visible-window login, whether NTULearn sends hidden announcements, and calendar items that aren't gradebook columns.
+
+**16b. `CLAUDE.md`:**
+
+- Python ≥ 3.12 (it said 3.10, but `pyproject.toml` requires 3.12).
+- MCP SDK notes: where `ToolError` lives, plain `def` tools run in a worker thread, `mcp dev` needs `mcp[cli]`.
+- Commands: the server self-test, the module self-tests, the live smoke tests, and the "used by another process" tip.
+
+**16c. This log:** the intro now points to sections instead of tabs, and three sections were added at the bottom: "Changes from the original Phase 1 plan", "Open items" and "Concepts".
+
+**`spike_session_check.py`** stays where it is for now (your choice). If you move it later, `scripts/` is the usual home for one-off tools, not `tests/` (which is for quick automated checks run by pytest). `CLAUDE.md` and the plan mention its path.
+
+Test (PowerShell):
+
+```
+uv run pytest
+```
+
+Expect 78 passed, 4 skipped.
+
+Commit (the sender-name bug fix and step 16 together):
+
+```
+git add src/uni_copilot/ntulearn_mcp/client/messages.py tests/test_announcements_messages.py CLAUDE.md docs/uni-copilot-project-plan.md docs/phase-1-build-log.md
+git commit -m "fix(messages): use real sender names and mark phase 1 done"
+```
+
+## Phase 1 summary
+
+- **What you have:** `ntulearn-mcp`, a local MCP server with 6 read-only tools (`login_status`, `login`, `list_courses`, `upcoming_deadlines`, `recent_announcements`, `recent_messages`). Claude Code starts it from `.mcp.json`, and the read-only tools are pre-allowed.
+- **How it's built:** `server.py` (the door) → `client/` (the work) → `client/http.py` (the only door to NTULearn, GET only) → `auth/session.py` (silent sign-in) + `parsers/html.py` + `models.py`. See "How it all connects" at the top.
+- **Safety, enforced in code and checked by tests:** no way to send anything but GET; grades never read; other people's text labelled UNTRUSTED; secrets never logged or printed; polite pacing.
+- **Tests:** 78 offline (synthetic data, ~1 s) + 4 opt-in live (counts only).
+- **Verified on your account (24 Oct):** silent sign-in (6 s), 16 sites / 8 subjects, calendar and gradebook agree, statuses, announcements (113, paging, attachments), messages (25 in 9 threads, real sender names).
+- **Next:** Phase 2, the local event store (`uni-copilot sync`, change detection, `pilot-mcp`).
+
+## Changes from the original Phase 1 plan
+
+- **Tools are plain `def`, not `async def`.** The SDK runs them in a worker thread (verified in step 1), so blocking code (requests, sync Playwright) needs no thread handling of our own.
+- **Submission status from my gradebook row**, reading only `columnId`, `status` and `exempt`; grade fields are never read. (Alternative was the attempts endpoint: no grades, but one request per assignment.)
+- **Added an `exempt` status** (prof excused you), and named "not started" `not_submitted`, because NTULearn can only say nothing was submitted.
+- **Silent re-login uses a hidden browser first**; a visible window only through the `login` tool.
+- **"Opens/closes" windows moved to Phase 4**: they need the content tree.
+- **Course nicknames later**: Phase 1 matches by code, part of a code or words from the name.
+- **`client/deadlines.py`** added to merge calendar + gradebook (not in the original layout).
+- **Bodies are light Markdown plus `links` and `files`** (your suggestion in step 11), not plain text.
+- **`include_organizations` also covers Non-curriculum sites**, because NTU marks nothing as an organization.
+- **Shared helpers:** `http.get_all` (paging) and `courses.pick` (the `course` argument), added in step 11 so every client uses the same code.
+- **Small in-memory caches** (memberships 1 h, gradebook columns 30 min) instead of `cache.py`, which waits for Phase 4.
+- **The `ntulearn-mcp` command** was added in step 13 (not step 1), once `server.main` existed.
+
+## Open items
+
+Everything not yet verified, from all steps. Each is safe to leave for now: the code either handles both cases or the item doesn't affect Phase 1.
+
+- **Session lifetime with no activity at all.** The watch run polled every 10 min, which may have kept the session alive. Doesn't matter much: a 401 triggers a silent re-login.
+- **The visible-window `login()` path.** Never needed since the build, because silent sign-in always worked. Test it when the Microsoft "stay signed in" cookie expires.
+- **The "blocked a PUT" safety net in `auth/session.py`** has never fired: sign-in leaves the page before the Ultra app gets that far.
+- **Whether reading messages through the API marks them as read.** You had 0 unread. Check the next time you have an unread message (2-minute test).
+- **2 past-due gradebook columns with no row for you**: missed work, or something you can't submit to (e.g. attendance)? Phase 1 only shows upcoming deadlines.
+- **Calendar items that aren't gradebook columns** (course events, personal entries): none seen yet; they would show status `unknown`.
+- **Whether NTULearn sends students hidden announcements** (drafts, outside a Restricted window): `visible_now` filters them anyway.
+- **The 1-minute "edited" threshold**: consistent with the data (63 of 83 under a minute), but chosen by us, not documented by Blackboard.
+- **`otherName` handling in `sender_name`**: never seen filled in.
+- **The course `url` format** (`/ultra/courses/<id>/outline`) and deep links to single items: not verified.
+- **429 and 5xx retries** are tested only against a fake server, on purpose (we don't provoke NTULearn).
+- **Why IE2106 "Assignment 1" was missing from the calendar on 23 Oct**: the merge covers it either way.
+
+## Concepts
+
+- **MCP (Model Context Protocol):** the standard way Claude talks to tools. Our server offers tools; Claude Code starts it and calls them.
+- **stdio:** "standard input/output". Claude Code talks to our server by writing to its stdin and reading its stdout, which is why logs must go to stderr.
+- **Tool:** a Python function registered with `@mcp.tool(...)`. Claude sees its name, docstring, inputs and output shape, never its code.
+- **Input / output schema:** a JSON description of a tool's inputs and outputs that the SDK builds from type hints and pydantic models.
+- **Annotations (`read_only_hint` etc.):** labels on a tool telling Claude Code it only reads, so it can be pre-allowed.
+- **`ToolError`:** the error type the SDK sends back to Claude as a readable message instead of crashing.
+- **Playwright:** a library that drives a real browser from Python. We only use it to sign in.
+- **Chromium:** the open-source browser Chrome is built on; Playwright has its own copy.
+- **Headless:** running the browser with no window.
+- **Persistent profile:** a saved browser folder (`.auth/profile`) that remembers cookies between runs, like your everyday Chrome.
+- **Cookie:** a small name=value note a site asks the browser to send back on every visit, so it recognises you. `BbRouter` is NTULearn's session cookie.
+- **Session cookie:** a cookie with no expiry date; a browser deletes it when it closes.
+- **Jar (`RequestsCookieJar`):** a container of cookies; a `requests` session sends the matching ones with every request.
+- **SSO / SAML:** single sign-on. NTULearn asks Microsoft "who is this?" and trusts the answer, so one Microsoft sign-in covers many sites.
+- **Spike:** a short throwaway experiment that answers a risky question before building the real thing.
+- **GET:** an HTTP request that only reads. POST/PUT/DELETE change things; our client can't send them.
+- **Status codes:** 200 OK, 401 not signed in, 403 no access, 404 not found, 429 too many requests, 5xx server trouble.
+- **Backoff:** waiting longer between each retry (2, 4, 8 s). **Retry-After:** a header where the server says how long to wait.
+- **Paging (`nextPage`):** a long list sent in pages; each page points to the next.
+- **Lock:** makes threads take turns on shared data. **Semaphore:** a lock with N seats (we use 2: at most 2 requests at once).
+- **Thread:** a separate line of work in the same program; the SDK runs each tool call in one.
+- **Pacer:** our "ticket machine" that spaces requests 1 s apart.
+- **Cache / TTL:** keeping a result in memory for a while (time-to-live) to avoid asking again.
+- **Package / module / import:** a folder with `__init__.py` / a `.py` file / using one file's code in another.
+- **Class / object (instance) / method:** a blueprint / one thing built from it / a function that belongs to it.
+- **Pure function:** uses only its inputs (no network, no saved state), so it's easy to test.
+- **Dataclass:** Python's lightweight record class, used for internal hand-offs (`CalendarItem`, `DueColumn`).
+- **Pydantic model:** a class that checks its fields and turns into JSON, used for everything Claude sees.
+- **`frozen=True`:** the object can't be changed after it's made.
+- **Computed field:** a field calculated from others (e.g. `due_sgt` from `due_at`), included in the JSON.
+- **Type hint:** a label like `-> AnnouncementList`; Python doesn't enforce it, but the SDK reads it.
+- **Decorator:** the `@something` line above a function that wraps or registers it.
+- **Context manager (`with`):** code that runs before and after a block; `_as_tool_errors()` uses one to translate errors.
+- **Dependency injection:** passing a helper in (e.g. `signer=sign_in`) so tests can pass a fake one.
+- **Parser:** code that reads a format (here HTML) and turns it into something simpler.
+- **Markdown:** a light text format (`**bold**`, `[text](url)`, `- item`) Claude reads and writes easily.
+- **Prompt injection:** text written to trick an AI into following instructions. That's why other people's text is labelled UNTRUSTED.
+- **Editable install (`.pth`):** uv links the project's `src/` into the virtual environment, so code changes apply without reinstalling.
+- **Dev dependency:** needed only while developing (pytest, `mcp[cli]`), not to run the server.
+- **pytest / test / fixture / monkeypatch:** the test runner / a `test_` function that checks with `assert` / a helper a test gets by naming it / swapping something (like the network) for a fake during one test.
+- **Regression test:** a test written for a bug that was fixed, so it can't quietly come back.
+- **Conventional Commits:** `type(scope): summary`, e.g. `feat(client): ...`, `fix(messages): ...`, `docs: ...`.
