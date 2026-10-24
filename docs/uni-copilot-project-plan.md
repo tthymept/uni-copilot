@@ -327,7 +327,7 @@ Each phase ends with something usable.
 
 ## 11. Open questions
 
-- Session: how long copied sessions last with no activity at all (the watch run polled every 10 min, which may have kept them alive); whether silent sign-in works in a headless browser.
+- Session: how long copied sessions last with no activity at all (the watch run polled every 10 min, which may have kept them alive).
 - Not yet verified endpoints: Discussions, Groups, content availability windows.
 - Whether reading `conversations` via the API marks messages as read (I had 0 unread when tested).
 - Past-due gradebook columns with no row for me: missed work, or items with nothing to submit? (2 cases on 24 Oct.)
@@ -352,6 +352,7 @@ Each phase ends with something usable.
 - Always use the full base URL; relative fetches hit a CDN host and 404.
 - 24 Oct: silent sign-in from the saved profile in 3–4 s on a later day. Watch run: `users/me` and the video-site transcript list both stayed 200 for 4 h (checked every 10 min), even after `__cf_bm` expired.
 - Loading `/ultra/course` makes NTULearn's own page send `PUT /learn/api/v1/utilities/batch` (the web app's request batching, not ours). The login flow leaves the page as soon as `users/me` is 200.
+- 24 Oct: silent sign-in also works in a **headless** browser with the same profile: 6 s typical (19 s on a cold first start). Cookies exported: `AWSALB`, `BbRouter`, `samlCookie`.
 
 **Courses and terms**
 - Memberships: `/learn/api/v1/users/{userId}/memberships?expand=course&limit=100`. Response has `paging` (`nextPage`). Course has `displayId`, `displayName`, `id`, `isOrganization`, `isAvailable`, `isClosed`, embedded `term`.
