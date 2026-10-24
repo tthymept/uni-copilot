@@ -200,6 +200,7 @@ class Message(_Model):
     files: list[str] = Field(default_factory=list, description=UNTRUSTED + " Names of files attached in the body.")
     posted_at: UtcDatetime
     is_read: bool | None = None
+    sent_by_me: bool = False
 
     # Sending time in Singapore time.
     @computed_field

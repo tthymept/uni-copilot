@@ -486,3 +486,50 @@ Commit:
 git add src/uni_copilot/ntulearn_mcp docs/uni-copilot-project-plan.md docs/phase-1-build-log.md
 git commit -m "feat(client): add recent announcements with markdown bodies"
 ```
+
+## Step 12: client/messages.py
+
+Tested live: 5 messages in the last 14 days, 25 messages in 9 conversations over 180 days, matching NTULearn's own thread counts exactly.
+
+**What was verified first** (probes, GET only, counts and key names only):
+
+- The conversation list (`/courses/{id}/conversations`) works on all 16 sites: 9 conversations (IE2106 7, CC0006 1, IE2108 1), no paging.
+- Each conversation in the list carries only its **newest** message, as a preview. `totalCount` is the real thread length (25 in total).
+- The full thread is `/courses/{id}/conversations/{conversationId}/messages`, oldest first, paged like other lists.
+- `body` is an object, not a string: `rawText` and `displayText` are both HTML. They gave the same text after parsing for 25/25, so `displayText` (what the page shows) is used.
+- `sender` has `givenName`, `familyName` and `preferredDisplayName`.
+- You had 0 unread messages before and after reading a full thread through the API. So it's still not proven that reading doesn't mark messages as read; there was nothing unread to test with.
+
+**12a. `src/uni_copilot/ntulearn_mcp/client/messages.py`** (new). Every function has a comment above it, and the top has an "In plain words" block.
+
+- `MessagesClient.recent(since_days=14, course=None)` returns a `MessageList`, newest first.
+- **Only active threads are fetched.** For each site: 1 call for the conversation list. Then `active_since` checks the preview (the newest message) and `updatedDate`, and only conversations with activity in the window get their full thread fetched. 14 days: about 20 s; 180 days: about 25 s.
+- Only messages posted inside the window are kept, even from an active thread.
+- `sender_name`: the preferred name if set, else "given family". Labelled UNTRUSTED like the body.
+- `body_html`: `displayText`, falling back to `rawText`, or a plain string if a message ever uses one. Then `parse_html` from step 11 gives Markdown, links and files.
+- A site or a single thread that fails becomes a note; the rest still come back. `course` goes through `courses.pick` like the other tools.
+
+**12b. `models.py`:** `Message` got `sent_by_me`, so Claude can tell your own messages from your prof's.
+
+**12c. Plan doc:** the preview-only list, the full-thread endpoint, the body object and the sender fields added to Appendix A.
+
+Self-test results (verified):
+
+1. Last 14 days: 5 messages (IE2106 4, CC0006 1), all read, none by you, all with a sender name, one with an attached file.
+2. Last 180 days: 25 messages in 9 conversations (IE2106 23, CC0006 1, IE2108 1). 0 by you, 0 unread, 25 with a sender name, 3 with links, 2 with files, 0 empty.
+3. `course='zzzz'` → "No course matches 'zzzz'".
+
+Test (PowerShell):
+
+```
+uv run python -m uni_copilot.ntulearn_mcp.client.messages
+```
+
+Expect your last 14 days of messages as one line each (code, SGT time, read, by me, lines, links, files; no names or text), then the 180-day summary.
+
+Commit:
+
+```
+git add src/uni_copilot/ntulearn_mcp/client/messages.py src/uni_copilot/ntulearn_mcp/models.py docs/uni-copilot-project-plan.md docs/phase-1-build-log.md
+git commit -m "feat(client): add recent course messages"
+```
