@@ -57,26 +57,13 @@ def calendar_items(http: NtuLearnHttp, since: datetime, until: datetime) -> list
     seen: dict[str, CalendarItem] = {}
     windows = split_windows(since, until, CALENDAR_MAX_WEEKS)
     for start, end in windows:
-        for raw in _fetch_window(http, start, end):
+        params = {"since": start.isoformat(), "until": end.isoformat()}
+        for raw in http.get_all(CALENDAR_PATH, params):
             item = to_item(raw)
             if item is not None:
                 seen[item.id] = item
     log.info("calendar: %d items in %d window(s)", len(seen), len(windows))
     return sorted(seen.values(), key=lambda i: i.end)
-
-
-# One API call (plus paging, if NTULearn ever pages this list) for one window.
-def _fetch_window(http: NtuLearnHttp, since: datetime, until: datetime) -> list[dict[str, Any]]:
-    raw: list[dict[str, Any]] = []
-    path: str | None = CALENDAR_PATH
-    params: dict[str, Any] | None = {"since": since.isoformat(), "until": until.isoformat()}
-    while path:
-        body = http.get_json(path, params)
-        raw += body.get("results", [])
-        # nextPage carries its own query string; not seen yet in practice.
-        path = (body.get("paging") or {}).get("nextPage")
-        params = None
-    return raw
 
 
 # ---------- Pure functions (no network; tested offline in step 15) ----------

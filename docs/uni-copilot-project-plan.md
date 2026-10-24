@@ -371,7 +371,9 @@ Each phase ends with something usable.
 - Attempts also readable by me: `/learn/api/public/v1/courses/{id}/gradebook/columns/{columnId}/attempts` → `id`, `status`, `created`, `exempt`, `userId` (no score). One request per column, so only a fallback.
 
 **Announcements and messages**
-- Announcements: `/learn/api/public/v1/courses/{id}/announcements` → `id`, `title`, `body` (HTML), `created`, `modified`, `availability`, `draft`, `creator`, `position`. The internal `/learn/api/v1/courses/{id}/announcements` returns the same items plus `readStatus`, `startDateRestriction`, `endDateRestriction`.
+- Announcements: `/learn/api/public/v1/courses/{id}/announcements` → `id`, `title`, `body` (HTML), `created`, `modified`, `availability`, `draft`, `creator`, `position`.
+- 24 Oct (16 sites, 113 posts): newest first by `created` (`position` 1..n). Default page size 10, `nextPage` = `.../announcements?offset=10`; `limit=100` fits every site in one call (max 27). `sort=created(desc)` → 400. `creator` is a user id string (no name). No drafts. `availability.duration.type` = `Permanent` (73) or `Restricted` with `start`/`end` (10). `modified - created` < 1 min for 63 of 83; 20 edited later; some posts created months ago were edited recently. No post duplicated across sites.
+- Announcement HTML: mostly `p`, `td`, `span`, `br`, `strong`, `tr`, `li`, `a`, `ul`, `em`; tables common, often with `<p>` in cells. Attached files: `<a data-bbtype="attachment" data-bbfile='{...}'>`, JSON keys `linkName` (26/26), `displayName`, `fileName` (22/26), `mimeType`, `fileSize`, `resourceUrl`, `alternativeText`, `render`. The internal `/learn/api/v1/courses/{id}/announcements` returns the same items plus `readStatus`, `startDateRestriction`, `endDateRestriction`.
 - Course Messages: `/learn/api/v1/courses/{id}/conversations` (internal, undocumented) → conversations with `id`, `createdDate`, `updatedDate`, `unreadCount`, `totalCount`, `messages[]` (`body`, `postDate`, `sender`, `senderId`, `isRead`, `type`). `/courses/{id}/messages` → 404; public v1 → 404.
 - `/learn/api/v1/messages/summary`: per-course `numUnreadMessages`, `isCourseMessagesEnabled`, `termName`.
 

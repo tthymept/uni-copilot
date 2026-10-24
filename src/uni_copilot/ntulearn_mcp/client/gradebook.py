@@ -62,7 +62,7 @@ class DueColumn:
 # like totals, are skipped). Follows paging for big gradebooks.
 def due_columns(http: NtuLearnHttp, course_site_id: str) -> list[DueColumn]:
     columns = []
-    for raw in _fetch_all(http, f"/learn/api/public/v2/courses/{course_site_id}/gradebook/columns"):
+    for raw in http.get_all(f"/learn/api/public/v2/courses/{course_site_id}/gradebook/columns"):
         due = parse_time((raw.get("grading") or {}).get("due"))
         if raw.get("id") and due is not None:
             columns.append(DueColumn(id=raw["id"], course_site_id=course_site_id,
@@ -74,19 +74,8 @@ def due_columns(http: NtuLearnHttp, course_site_id: str) -> list[DueColumn]:
 # entry in your row: {column id: status}. Columns missing from the result
 # mean "not_submitted" (the caller decides that, see status_for).
 def my_statuses(http: NtuLearnHttp, course_site_id: str, user_id: str) -> dict[str, SubmissionStatus]:
-    rows = _fetch_all(http, f"/learn/api/public/v2/courses/{course_site_id}/gradebook/users/{user_id}")
+    rows = http.get_all(f"/learn/api/public/v2/courses/{course_site_id}/gradebook/users/{user_id}")
     return statuses_from_rows(rows)
-
-
-# GETs a list endpoint and follows paging.nextPage until the end.
-def _fetch_all(http: NtuLearnHttp, path: str) -> list[dict[str, Any]]:
-    results: list[dict[str, Any]] = []
-    next_path: str | None = path
-    while next_path:
-        body = http.get_json(next_path)
-        results += body.get("results", [])
-        next_path = (body.get("paging") or {}).get("nextPage")
-    return results
 
 
 # ---------- Pure functions (no network; tested offline in step 15) ----------

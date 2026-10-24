@@ -122,6 +122,20 @@ class NtuLearnHttp:
             except ValueError:
                 raise NtuLearnError(path, r.status_code, "response was not JSON") from None
 
+    # For list endpoints: GETs `path` and follows paging.nextPage until the end,
+    # returning all `results` together. nextPage is a path with its own query
+    # string (verified 24 Oct: ".../announcements?offset=10"), so the first
+    # call's params are not sent again.
+    def get_all(self, path: str, params: dict[str, Any] | None = None) -> list[Any]:
+        results: list[Any] = []
+        next_path: str | None = path
+        while next_path:
+            body = self.get_json(next_path, params)
+            results += body.get("results", [])
+            next_path = (body.get("paging") or {}).get("nextPage")
+            params = None
+        return results
+
     # Makes sure we have cookies. Does a silent sign-in only if we have none yet
     # (e.g. right after the server starts). Never opens a window.
     def ensure_signed_in(self) -> None:

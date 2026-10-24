@@ -385,3 +385,104 @@ Commit:
 git add src/uni_copilot/ntulearn_mcp/client/deadlines.py src/uni_copilot/ntulearn_mcp/client/calendar.py src/uni_copilot/ntulearn_mcp/client/gradebook.py docs/phase-1-build-log.md
 git commit -m "feat(client): merge calendar and gradebook into upcoming deadlines"
 ```
+
+## Step 10: parsers/html.py
+
+Offline, no NTULearn calls. The self-test passes on made-up HTML.
+
+**10a. `src/uni_copilot/ntulearn_mcp/parsers/html.py`** (new). Every function has a comment above it, and the top of the file has an "In plain words" block.
+
+- **Why:** NTULearn stores announcement and message bodies as HTML (text plus tags like `<p>`, `<br>`, `<a href=...>`). Claude reads plain text more reliably, and it costs fewer tokens.
+- **How:** Python's built-in `html.parser` reads the HTML and calls three methods of `_TextExtractor` as it goes: `handle_starttag` (an opening tag), `handle_endtag` (a closing tag) and `handle_data` (the text in between). We collect the text and add line breaks where the page would show them. Nothing to install.
+- **What the conversion does:**
+  - Paragraphs and headings become blocks separated by an empty line. `<br>` becomes a new line.
+  - List items become `- item`. Table cells are joined with ` | `, one row per line.
+  - Links become `text (url)`, or just the url if the text already is the url. `/path` links get the NTULearn base URL in front.
+  - Ultra file attachments (`data-bbfile`) become `[file: name]`. Images become `[image: alt]`.
+  - `&amp;`, `&nbsp;` and other entities are decoded. Extra spaces collapse to one, like in a browser.
+- **`_break(n)`** makes sure the text ends with at least n line breaks without piling up more. The first version left an empty line between table rows (one break from `</tr>` plus one from `<tr>`), and this fixed it.
+- **`html_to_text(html, max_chars=None)`** is the one function other code calls. `max_chars` cuts very long posts and adds `…[truncated]`, so one huge announcement can't flood Claude's context.
+- **Safety:** the body is untrusted text. The parser only reads it: no network, nothing executed. `<script>` and `<style>` contents are dropped. Only `http`, `https` and `mailto` links are kept, so a `javascript:` link appears as plain text ("click me") with no link.
+
+Self-test results (verified): the made-up announcement came out as clean paragraphs, a 2-item list, links with their URLs (the `javascript:` one dropped), `[file: tutorial5.pdf] [image: diagram]`, and a 2-row table. Truncation to 40 characters worked. Plain text and `None` pass through. Extra line-break checks: `<div>a</div><div>b</div>` → one new line, `a<br><br>b` → an empty line, `<p>x</p> <p>y</p>` → an empty line.
+
+Test (PowerShell):
+
+```
+uv run python -m uni_copilot.ntulearn_mcp.parsers.html
+```
+
+Expect the made-up announcement as readable text (as above), a truncated version ending in `…[truncated]`, and `'just text' ''`.
+
+Commit:
+
+```
+git add src/uni_copilot/ntulearn_mcp/parsers/html.py
+git commit -m "feat(parsers): add html to markdown converter"
+```
+
+## Step 11: client/announcements.py (plus parser upgrade)
+
+Tested live: 18 announcements in the last 21 days, 113 in the last 180, every body converted. You asked whether the output should stay structured, so before building announcements the parser from step 10 was upgraded.
+
+**Why the parser changed.** The tools already return JSON. Claude reads it and writes the answer for wherever you asked (Telegram or the terminal), so the tool's job is to hand over clean, faithful data, and presentation is Claude's job. Plain text lost two useful things: links and files as data, and emphasis ("**NOT** allowed"). So the body is now light Markdown, with links and files as separate lists.
+
+**What was verified first** (probes, GET only, counts and key names only):
+
+- `[file: name]`: attached files are `<a data-bbtype="attachment" data-bbfile='{...}'>`, and the JSON has `linkName` on all 26 attachments, so the first guess was right.
+- Paging: the default page size is 10 and 4 sites needed 2–3 pages. `nextPage` is a path with its own query string (`...announcements?offset=10`), which also settles the open `nextPage` question from steps 6–8. With `limit=100` every site fits in one call (the largest had 27), so it's 16 calls instead of 22.
+- Order: newest first by `created`. `sort=created(desc)` is rejected with 400, but isn't needed.
+- Tables: 619 cells, often with `<p>` inside, which would have split rows.
+- Edits: 63 of 83 have `modified` within 1 minute of `created`, so the 1-minute "edited" threshold holds.
+
+**11a. `parsers/html.py`** (rewritten):
+
+- `parse_html(html, max_chars)` returns `ParsedHtml(text, links, files)`, replacing `html_to_text`.
+- `text` is light Markdown: `**bold**` (also used for underline and headings), `*italic*`, `[text](url)`, `- ` list items, `a | b` table rows, `[file: name]`, `[image: alt]`.
+- `_wrap` puts the Markdown marker right next to the text and keeps spaces outside (`" Friday "` → `" **Friday** "`), because Markdown needs that. Nested bold doesn't become `****`.
+- `_cell_depth`: inside a table cell, `<p>` and `<br>` become spaces, so a cell with two paragraphs stays on one row.
+- `links` collects every safe link as (text, url). `files` collects attachment names.
+- Self-test: bold, underline-as-bold and italic all work. A link became `[week 10](https://...)`. The `javascript:` link was reduced to its text. `files: ['tutorial5.pdf']`. A cell with two `<p>`s stayed on one row.
+
+**11b. `models.py`:**
+
+- New `Link` model (`text`, `url`).
+- `Announcement` and `Message`: `body_text` became `body` (light Markdown, with a description telling Claude the format), plus `links` and `files`.
+- `Announcement.modified_sgt`: the edit time, if really edited. Two ML0004 posts created in April and May were edited recently and show up as "recent", and this lets Claude say when they were changed.
+
+**11c. Shared helpers** (small refactors so steps 11 and 12 don't copy code):
+
+- `http.py`: new `get_all(path, params)` follows `nextPage` for any list endpoint. `courses.py`, `calendar.py` and `gradebook.py` now use it instead of their own loops.
+- `courses.py`: new `pick(course)`, the one place a tool's `course` argument is turned into subjects (all, or exactly one; 0 or 2+ matches raise `ValueError` with the codes). `deadlines.py` uses it now. The deadlines self-test was re-run after the refactor and gave identical results.
+
+**11d. `src/uni_copilot/ntulearn_mcp/client/announcements.py`** (new). Every function has a comment above it, and the top has an "In plain words" block.
+
+- `AnnouncementsClient.recent(since_days=21, course=None)` returns an `AnnouncementList`, newest first. One call per site with `limit=100`, about 17 s. No cache: announcements should always be fresh, and Phase 2's local store will make repeats fast.
+- `visible_now` skips drafts and `Restricted` posts outside their start/end window, i.e. what you wouldn't see on the course page. Whether NTULearn even sends those to students isn't verified; it's a safety net.
+- `is_recent`: posted or edited since the cutoff, so a changed old post ("venue changed") still shows up.
+- `merge_duplicates`: the same title and body on two sites of one subject become one item with both site ids. There are no such duplicates in your posts today, but profs do cross-post.
+- A site that fails becomes a note; the rest still come back.
+
+Self-test results (verified):
+
+1. Last 21 days: 18 announcements in 17 s, listed with course code, date, edited, line count, links, files and sites (no titles or bodies).
+2. Last 180 days: 113 announcements (IE2108 27, CL0105 26, CC0006 15, IE2110 13, IE0005 11, ML0004 8, IE2106 8, DA3000 5). 22 edited, 36 with links, 19 with files (31 files), 66 with bold, 9 with table rows, 1 truncated at 4,000 characters, 0 empty.
+3. `course='zzzz'` → "No course matches 'zzzz'".
+
+**11e. Plan doc:** announcement paging, order, availability, edit timing and the HTML/attachment format added to Appendix A.
+
+Test (PowerShell):
+
+```
+uv run python -m uni_copilot.ntulearn_mcp.parsers.html
+uv run python -m uni_copilot.ntulearn_mcp.client.announcements
+```
+
+Expect the made-up post as Markdown with links and files listed separately; then your last 21 days of announcements as one line each (code, SGT date, edited, lines, links, files, sites; no titles), and the 180-day summary.
+
+Commit:
+
+```
+git add src/uni_copilot/ntulearn_mcp docs/uni-copilot-project-plan.md docs/phase-1-build-log.md
+git commit -m "feat(client): add recent announcements with markdown bodies"
+```

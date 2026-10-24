@@ -59,16 +59,10 @@ class CoursesClient:
         with self._lock:
             if self._raw_courses and time.monotonic() - self._fetched_at < MEMBERSHIPS_TTL_S:
                 return self._raw_courses
-            courses: list[dict[str, Any]] = []
-            path: str | None = f"/learn/api/v1/users/{uid}/memberships"
-            params: dict[str, Any] | None = {"expand": "course", "limit": 100}
-            while path:
-                body = self._http.get_json(path, params)
-                courses += [m["course"] for m in body.get("results", []) if m.get("course")]
-                # nextPage is a path with its own query string (format not
-                # verified: we've never had more than 100 memberships).
-                path = (body.get("paging") or {}).get("nextPage")
-                params = None
+            memberships = self._http.get_all(
+                f"/learn/api/v1/users/{uid}/memberships", {"expand": "course", "limit": 100}
+            )
+            courses = [m["course"] for m in memberships if m.get("course")]
             self._raw_courses, self._fetched_at = courses, time.monotonic()
             log.info("memberships: %d sites", len(courses))
             return courses
@@ -95,9 +89,24 @@ class CoursesClient:
         return CourseList(term=term, courses=courses, notes=notes)
 
     # Turns what you typed ("IE2108", "ie2108", "data structures") into
-    # matching subjects this term. The tools use this for their `course` argument.
+    # matching subjects this term. Can return 0, 1 or several.
     def find(self, query: str, term: str | None = None) -> list[Course]:
         return match_courses(self.list_courses(term).courses, query)
+
+    # What every tool's `course` argument goes through: None -> all of this
+    # term's subjects; text -> exactly one subject. 0 or 2+ matches raise
+    # ValueError listing the codes, which the tool passes on to Claude.
+    def pick(self, course: str | None) -> list[Course]:
+        all_courses = self.list_courses().courses
+        if course is None:
+            return all_courses
+        found = match_courses(all_courses, course)
+        if not found:
+            codes = ", ".join(c.code for c in all_courses)
+            raise ValueError(f"No course matches '{course}'. This term: {codes}")
+        if len(found) > 1:
+            raise ValueError(f"'{course}' matches several courses: {', '.join(c.code for c in found)}")
+        return found
 
 
 # ---------- Pure functions (no network; tested offline in step 15) ----------

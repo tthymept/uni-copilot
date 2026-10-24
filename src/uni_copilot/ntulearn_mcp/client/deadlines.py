@@ -43,10 +43,10 @@ from datetime import datetime, timedelta, timezone
 
 from uni_copilot.ntulearn_mcp.auth.session import AuthError
 from uni_copilot.ntulearn_mcp.client.calendar import CalendarItem, calendar_items
-from uni_copilot.ntulearn_mcp.client.courses import CoursesClient, match_courses
+from uni_copilot.ntulearn_mcp.client.courses import CoursesClient
 from uni_copilot.ntulearn_mcp.client.gradebook import DueColumn, due_columns, my_statuses, status_for
 from uni_copilot.ntulearn_mcp.client.http import NtuLearnError, NtuLearnHttp
-from uni_copilot.ntulearn_mcp.models import Course, Deadline, DeadlineList, SubmissionStatus
+from uni_copilot.ntulearn_mcp.models import Deadline, DeadlineList, SubmissionStatus
 
 log = logging.getLogger(__name__)
 
@@ -70,7 +70,7 @@ class DeadlinesClient:
     def upcoming(self, days: int = 7, course: str | None = None) -> DeadlineList:
         if not 1 <= days <= MAX_DAYS:
             raise ValueError(f"days must be between 1 and {MAX_DAYS}")
-        subjects = self._pick_subjects(course)
+        subjects = self._courses.pick(course)
         site_codes = {s.id: c.code for c in subjects for s in c.sites}
         now = datetime.now(timezone.utc)
         until = now + timedelta(days=days)
@@ -108,19 +108,6 @@ class DeadlinesClient:
         deadlines = [with_status(m, site_codes, statuses) for m in merged]
         log.info("deadlines: %d in %d day(s)", len(deadlines), days)
         return DeadlineList(days=days, deadlines=deadlines, notes=notes)
-
-    # The subjects in scope: all of this term's, or the ones matching `course`.
-    def _pick_subjects(self, course: str | None) -> list[Course]:
-        all_courses = self._courses.list_courses().courses
-        if course is None:
-            return all_courses
-        found = match_courses(all_courses, course)
-        codes = ", ".join(c.code for c in all_courses)
-        if not found:
-            raise ValueError(f"No course matches '{course}'. This term: {codes}")
-        if len(found) > 1:
-            raise ValueError(f"'{course}' matches several courses: {', '.join(c.code for c in found)}")
-        return found
 
     # One site's due columns, from the cache if fetched less than 30 min ago.
     def _cached_columns(self, site_id: str) -> list[DueColumn]:

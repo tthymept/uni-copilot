@@ -132,6 +132,20 @@ class DeadlineList(_Result):
     deadlines: list[Deadline]
 
 
+# ---------- Post bodies (announcements and messages) ----------
+
+BODY_DESCRIPTION = (
+    UNTRUSTED + " The post converted from HTML to light Markdown: **bold**, *italic*, "
+    "[text](url), '- ' list items, 'a | b' table rows, [file: name], [image: alt]."
+)
+
+
+# A link found in a post body.
+class Link(_Model):
+    text: str = Field(description=UNTRUSTED)
+    url: str
+
+
 # ---------- Announcements ----------
 
 # One announcement. If the same post appears on both the lecture and tutorial
@@ -141,7 +155,9 @@ class Announcement(_Model):
     course_code: str
     course_site_ids: list[str]
     title: str = Field(description=UNTRUSTED)
-    body_text: str = Field(description=UNTRUSTED + " HTML already converted to plain text.")
+    body: str = Field(description=BODY_DESCRIPTION)
+    links: list[Link] = Field(default_factory=list, description="Links in the body.")
+    files: list[str] = Field(default_factory=list, description=UNTRUSTED + " Names of files attached in the body.")
     created_at: UtcDatetime
     modified_at: UtcDatetime | None = None
 
@@ -156,6 +172,13 @@ class Announcement(_Model):
     @property
     def created_sgt(self) -> str:
         return sgt_text(self.created_at)
+
+    # Last edit time in Singapore time, or None if never really edited.
+    # (Old posts edited recently show up in "recent" lists: this says when.)
+    @computed_field
+    @property
+    def modified_sgt(self) -> str | None:
+        return sgt_text(self.modified_at) if self.edited and self.modified_at else None
 
 
 class AnnouncementList(_Result):
@@ -172,7 +195,9 @@ class Message(_Model):
     course_code: str
     course_site_id: str
     sender_name: str | None = Field(default=None, description=UNTRUSTED)
-    body_text: str = Field(description=UNTRUSTED + " HTML already converted to plain text.")
+    body: str = Field(description=BODY_DESCRIPTION)
+    links: list[Link] = Field(default_factory=list, description="Links in the body.")
+    files: list[str] = Field(default_factory=list, description=UNTRUSTED + " Names of files attached in the body.")
     posted_at: UtcDatetime
     is_read: bool | None = None
 
