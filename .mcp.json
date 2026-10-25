@@ -4,6 +4,11 @@
       "type": "stdio",
       "command": "uv",
       "args": ["run", "ntulearn-mcp"]
+    },
+    "pilot": {
+      "type": "stdio",
+      "command": "uv",
+      "args": ["run", "pilot-mcp"]
     }
   }
 }

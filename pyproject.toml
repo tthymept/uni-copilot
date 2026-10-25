@@ -17,6 +17,7 @@ dependencies = [
 [project.scripts]
 uni-copilot = "uni_copilot.cli:main"
 ntulearn-mcp = "uni_copilot.ntulearn_mcp.server:main"
+pilot-mcp = "uni_copilot.pilot_mcp.server:main"
 
 [build-system]
 requires = ["uv_build>=0.12.11,<0.13.0"]

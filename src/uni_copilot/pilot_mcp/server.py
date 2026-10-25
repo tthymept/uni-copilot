@@ -33,7 +33,7 @@ import asyncio
 import logging
 import sqlite3
 import sys
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -100,7 +100,7 @@ ChannelArg = Annotated[
 # Opens the store for one tool call and closes it afterwards. Turns errors
 # into ToolError, the error type the SDK sends back to Claude as a message.
 @contextmanager
-def _store() -> Iterator[sqlite3.Connection]:
+def _store() -> Generator[sqlite3.Connection, None, None]:
     try:
         conn = open_db(DB)
     except sqlite3.Error as e:

@@ -5,7 +5,12 @@
       "mcp__ntulearn__list_courses",
       "mcp__ntulearn__upcoming_deadlines",
       "mcp__ntulearn__recent_announcements",
-      "mcp__ntulearn__recent_messages"
+      "mcp__ntulearn__recent_messages",
+      "mcp__pilot__list_events",
+      "mcp__pilot__whats_new",
+      "mcp__pilot__get_event",
+      "mcp__pilot__sync_status",
+      "mcp__pilot__mark_seen"
     ]
   }
 }

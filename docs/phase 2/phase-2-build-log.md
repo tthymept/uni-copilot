@@ -629,6 +629,52 @@ git add src/uni_copilot/pilot_mcp "docs/phase 2"
 git commit -m "feat(pilot): add pilot mcp server over the local event store"
 ```
 
+## Step 9: wiring pilot-mcp into Claude Code
+
+**9a. `pyproject.toml`:** new command `pilot-mcp = "uni_copilot.pilot_mcp.server:main"`. `uv sync` turns it into `.venv/Scripts/pilot-mcp.exe`, the same way as `ntulearn-mcp` and `uni-copilot`.
+
+**9b. `.mcp.json`:** a second server, `"pilot"`, started with `uv run pilot-mcp`, next to `"ntulearn"`. Claude Code starts both when it opens this project. A new project server needs your approval the first time (Claude Code asks).
+
+**9c. `.claude/settings.json`:** pre-allowed `mcp__pilot__list_events`, `whats_new`, `get_event`, `sync_status` and **`mark_seen`**. The tool names are `mcp__<server>__<tool>`.
+
+- **Why `mark_seen` is pre-allowed although it writes:** it only moves our own bookmark in the local store. Nothing on NTULearn, nothing deleted, nothing sent anywhere. Claude calls it right after showing `whats_new`, so asking each time would just be a click. Remove it from the list if you'd rather approve it each time.
+- `mcp__ntulearn__login` is still **not** pre-allowed (it may open a browser window).
+
+**9d. `pilot_mcp/server.py`:** `_store()` now returns `Generator[sqlite3.Connection, None, None]` instead of `Iterator[...]`. Pylance flagged the old style as deprecated for `@contextmanager` functions. The behaviour is the same. Phase 1's `server.py` still uses the old style; it works, and can be tidied at any time.
+
+**How it connects:**
+
+```
+Claude Code opens the project
+  └─ reads .mcp.json → starts both servers in the background:
+       uv run ntulearn-mcp → ntulearn_mcp/server.py   (live NTULearn, slow, always fresh)
+       uv run pilot-mcp    → pilot_mcp/server.py      (local store, instant, "as of")
+  └─ reads .claude/settings.json → these tools run without asking
+You: "what's due this week?" → Claude picks a tool from either server
+```
+
+**`uv sync` was blocked again** ("ntulearn-mcp.exe ... used by another process") because this Claude Code session runs `ntulearn-mcp`. The venv still works; `pilot-mcp.exe` just doesn't exist until `uv sync` runs with Claude Code closed.
+
+Test (PowerShell):
+
+1. Close every Claude Code window (terminal and VS Code panel).
+2. `uv sync` → it should finish without errors; `.venv\Scripts\pilot-mcp.exe` now exists.
+3. `uv run uni-copilot sync` → fresher data (optional, but makes the next step more interesting).
+4. `claude --continue`. Approve the new `pilot` server if asked, then type `/mcp`: both `ntulearn` and `pilot` should show as connected.
+5. Ask: **"using pilot, what's due this week and what's new?"** Expect:
+   - an instant answer from `list_events` and `whats_new`, with no permission prompts;
+   - the answer says **"as of ... SGT"**;
+   - `whats_new` shows only changes since your first sync (or "nothing new");
+   - Claude then calls `mark_seen`.
+6. `uv run pytest` → 78 passed, 4 skipped.
+
+Commit:
+
+```
+git add pyproject.toml .mcp.json .claude/settings.json src/uni_copilot/pilot_mcp/server.py "docs/phase 2"
+git commit -m "chore(claude): register pilot server and allow its tools"
+```
+
 ## Open items
 
 Not verified yet. Each is checked in the step named in `phase-2-core.md` ("Things to check during Phase 2").
