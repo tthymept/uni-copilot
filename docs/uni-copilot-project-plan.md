@@ -2,7 +2,7 @@
 
 A personal academic agent for NTU students. It reads NTULearn (and later other sources), keeps track of what changed, and tells you what to do, in Telegram or Claude Code. It runs on your own computer with your own login, and never stores passwords.
 
-Status as of 24 Oct 2026: Phase 0 spike passed; **Phase 1 (`ntulearn-mcp` core) done**: 6 read-only tools working in Claude Code, 78 offline tests + 4 opt-in live tests. Build details: `docs/phase-1-build-log.md`. Next: Phase 2 (event store). "Verified" below means checked on my own account (GET only); "Not verified" means designed but not yet tested.
+Status as of 24 Oct 2026: Phase 0 spike passed; **Phase 1 (`ntulearn-mcp` core) done**: 6 read-only tools working in Claude Code, 78 offline tests + 4 opt-in live tests. Build details: `docs/phase 1/phase-1-build-log.md` (overview: `docs/phase 1/phase-1-core.md`). **Phase 2 (event store) started 25 Oct**: decisions made, step 0 done; overview `docs/phase 2/phase-2-core.md`, details `docs/phase 2/phase-2-build-log.md`. "Verified" below means checked on my own account (GET only); "Not verified" means designed but not yet tested.
 
 ---
 
@@ -99,6 +99,7 @@ Phase 1 tools are built as described below (✓). Every `course` argument accept
 **News**
 - ✓ `recent_announcements(since_days=21, course=None)` (1–180): posted or edited in the window, newest first; cross-posts merged; body as light Markdown plus `links` and `files`; `edited` + `modified_sgt`.
 - ✓ `recent_messages(since_days=14, course=None)` (1–180): course Messages (some profs use these instead of announcements); only threads active in the window are fetched in full; `sender_name`, `sent_by_me`, `is_read`, Markdown body plus `links` and `files`.
+- `get_announcement(announcement_id)` (later, noted 25 Oct; maybe also `get_message`): fetch one item live by id, the freshest copy of a single post, instead of a whole course's recent list. Not needed while `pilot-mcp` stores full bodies (`get_event`); useful for posts older than the sync window or when the store is stale. Needs the course site id too (the endpoint is per course), which the event already has.
 
 **Content**
 - `list_course_content(course, folder_id=None)`: one folder level; locked items marked "locked".
@@ -147,7 +148,7 @@ Every source is converted into one **event** shape:
 | `source` | ntulearn_calendar, ntulearn_gradebook, ntulearn_announcement, ntulearn_message, ntulearn_window, kaltura_recording, outlook, academic_calendar, exam_timetable, timetable, manual |
 | `kind` | deadline, test, exam, class, announcement, message, opens, closes, grade_released, recording_available, holiday |
 | `course_code` / `course_site_id` | e.g. IE2108 / `_2706657_1` |
-| `title`, `summary` | short text (no full bodies of untrusted text) |
+| `title`, `body` | full post as light Markdown, labelled UNTRUSTED when shown (changed in Phase 2: was short text only) |
 | `starts_at`, `due_at` | stored in UTC, shown in SGT |
 | `status` | open, submitted, graded, locked, done, cancelled |
 | `url` | link back to the source |
@@ -160,6 +161,16 @@ Other tables:
 - `calendar_links`: `event_id` ↔ Google Calendar event id.
 - `state`: last sync time per source, last "seen" time per channel.
 
+Phase 2 decisions (25 Oct):
+- One event per merged deadline: `ntulearn_gradebook:<column id>` (calendar and gradebook share the column id), with where it was found kept as a field. `ntulearn_calendar` is not used as a separate source.
+- Stored text: title + the full body (light Markdown) + `content_hash`, so answers have the whole text without a live fetch. A ~280-character `preview` is used only in compact lists. Bodies are labelled UNTRUSTED wherever Claude sees them; the database is local and git-ignored.
+- `pilot-mcp` adds `get_event(event_id)` (one item in full); `whats_new` returns changed items with full bodies.
+- Status mapping: `not_submitted`/`unknown` → open, `submitted` → submitted, `graded` → graded, `exempt` → done. Never a grade.
+- Sync window: deadlines −14 to +120 days, announcements and messages the last 30 days.
+- Two comparisons: sync compares with the stored events and writes `event_changes` (detecting); `whats_new` reads `event_changes` after the channel's "last seen" bookmark (reporting).
+- Freshness: the store is only as fresh as the last sync. Asking never triggers a fetch; every `pilot-mcp` answer states "as of <last sync time> SGT". "Right now" questions use the live `ntulearn-mcp` tools.
+- Database code: built-in `sqlite3`, plain SQL, schema version in `PRAGMA user_version`.
+
 ### 5.2 `uni-copilot` CLI (scripts, no AI)
 - `uni-copilot sync`: pull sources → upsert events → record changes. Run by Windows Task Scheduler (e.g. every 2 hours, 07:00–23:00).
 - `uni-copilot remind`: find unfinished deadlines due in 24 h / 2 h and tests tomorrow → send Telegram messages → record in `notifications_sent`. Every 30 min.
@@ -167,7 +178,10 @@ Other tables:
 
 ### 5.3 `pilot-mcp` tools (local state only; never touches NTULearn)
 - `list_events(days=7, kinds=None, course=None)`: from the store, fast.
-- `whats_new(since="last_seen", channel="telegram")`: changes since the channel last looked.
+- `whats_new(since="last_seen", channel="telegram")`: changes since the channel last looked. Only reads.
+- `get_event(event_id)`: one item with its full body (Phase 2).
+- `mark_seen(channel)`: moves the channel's "last seen" bookmark (Phase 2).
+- `sync_status()`: last sync time per source and failed sources (Phase 2). Every pilot result carries `as_of`.
 - `add_manual_event(...)`: for forwarded messages or things I tell the bot; always confirmed first.
 - `mark_done(event_id)`: hide an item I've handled outside NTULearn.
 - `send_telegram(text)`: push a message to my chat.
@@ -283,15 +297,16 @@ Each phase ends with something usable.
 
 **Phase 0: spike** (done)
 - Playwright login; copied cookies work with plain `requests` for NTULearn and the video site.
-- 24 Oct watch run: silent sign-in on a later day; both copied sessions stayed valid for 4 h with a check every 10 min.
+- Done (24 Oct): silent sign-in from the saved profile on a later day.
+- Done (24 Oct): 4-hour watch run. Both sessions stayed valid with calls every 10 min; Cloudflare didn't block plain `requests`. **Phase 0 complete.**
 
 **Phase 1: `ntulearn-mcp` core** (done 24 Oct 2026)
 - `login_status`, `login`, `list_courses`, `upcoming_deadlines` (with status), `recent_announcements`, `recent_messages`.
 - Opens/closes windows moved to Phase 4 (need the content tree).
 - Done when: Claude Code answers "what's due this week?" correctly for all my courses. ✓ Checked against NTULearn on 24 Oct; one bug found and fixed (message senders showed as "GIVEN_NAME").
 
-**Phase 2: event store**
-- SQLite schema, `uni-copilot sync`, change detection, `pilot-mcp` (`list_events`, `whats_new`), `weekly_actions` prompt.
+**Phase 2: event store** (started 25 Oct 2026)
+- SQLite schema, `uni-copilot sync`, change detection, `pilot-mcp` (`list_events`, `whats_new`, `mark_seen`, `sync_status`), `weekly_actions` skill (changed from prompt), optional Task Scheduler sync.
 - Done when: two syncs in a row report only real changes.
 
 **Phase 3: Telegram**
@@ -330,7 +345,7 @@ Each phase ends with something usable.
 
 ## 11. Open questions
 
-- Session: how long copied sessions last with no activity at all (the watch run polled every 10 min, which may have kept them alive).
+- Session: how long a session survives with no calls, or with calls 2 h apart (the planned sync interval). Silent sign-in, 10-min keepalive and Cloudflare were verified 24 Oct. Design for it anyway: silent re-login on 401 (built in Phase 1).
 - Not yet verified endpoints: Discussions, Groups, content availability windows.
 - Whether reading `conversations` via the API marks messages as read (I had 0 unread when tested).
 - Past-due gradebook columns with no row for me: missed work, or items with nothing to submit? (2 cases on 24 Oct.)
@@ -354,9 +369,11 @@ Each phase ends with something usable.
 - Cookies: `BbRouter` (session cookie, gone when the browser closes), `JSESSIONID`, `AWSALB` (~7 days), `samlCookie`.
 - Idle timeout ~3 h (`GET /learn/api/v1/utilities/timeUntilBbSessionInactive`). Reading it doesn't reset the timer. API calls 1–2 min after a reset didn't reset it either, but one after ~23 min idle did, so "last activity" seems to update only every so often.
 - Login check: `GET /learn/api/v1/users/me` → 200 / 401.
-- Playwright spike: first run needed manual sign-in (37 s); cookies copied into `requests` worked for NTULearn and the video site. Video site sets `__cf_bm` (Cloudflare, ~30 min).
+- Playwright spike: first run (23 Oct) needed manual sign-in (37 s); cookies copied into `requests` worked for NTULearn and the video site. Video site sets `__cf_bm` (Cloudflare, ~30 min).
 - Always use the full base URL; relative fetches hit a CDN host and 404.
-- 24 Oct: silent sign-in from the saved profile in 3–4 s on a later day. Watch run: `users/me` and the video-site transcript list both stayed 200 for 4 h (checked every 10 min), even after `__cf_bm` expired.
+- **Silent sign-in verified (24 Oct, ~13 h after the first run):** the saved profile signed in by itself in 3 s with no input. Copied cookies again worked for both sites.
+- **4-hour watch run (24 Oct, 10:12–14:12 SGT):** cookies copied once into `requests`, browser parked on a blank page, one `users/me` + one transcript-list call every 10 min. All 24 checks returned 200 for both sites. So calls every 10 min keep the NTULearn session alive past the 3-hour idle limit, and the video site kept working well after `__cf_bm` expired (10:42). Likely because `requests.Session` stores refreshed cookies from responses; not checked.
+- Not tested: how long a session survives with **no** calls (assume ~3 h), or with calls spaced 2 h apart.
 - Loading `/ultra/course` makes NTULearn's own page send `PUT /learn/api/v1/utilities/batch` (the web app's request batching, not ours). The login flow leaves the page as soon as `users/me` is 200.
 - 24 Oct: silent sign-in also works in a **headless** browser with the same profile: 6 s typical (19 s on a cold first start). Cookies exported: `AWSALB`, `BbRouter`, `samlCookie`.
 

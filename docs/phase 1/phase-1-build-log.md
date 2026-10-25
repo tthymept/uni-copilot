@@ -2,6 +2,8 @@
 
 What each finished step changed, how to test it, and its commit. Unverified points from each step are collected in the "Open items" section at the bottom. Terms like "jar", "headless" and "semaphore" are explained in the "Concepts" section at the bottom. "Changes from the original Phase 1 plan" is just above them.
 
+This log lived at `docs/phase-1-build-log.md` until the end of Phase 1; the `git add` lines in older steps show that old path because that's where it was at the time. It now lives in `docs/phase 1/`, next to `phase-1-core.md` (the short overview).
+
 ## How it all connects (read this first when you come back)
 
 ### The layers
@@ -879,6 +881,37 @@ Commit (the sender-name bug fix and step 16 together):
 ```
 git add src/uni_copilot/ntulearn_mcp/client/messages.py tests/test_announcements_messages.py CLAUDE.md docs/uni-copilot-project-plan.md docs/phase-1-build-log.md
 git commit -m "fix(messages): use real sender names and mark phase 1 done"
+```
+
+## After Phase 1: docs moved, and a VS Code save conflict repaired
+
+**What happened.** After the step 16 commit, VS Code showed a red "conflict" panel. It wasn't a git conflict: no merge was in progress, no conflict markers existed, and commit `90bdd5d` was safe and pushed. It was VS Code's **save conflict** ("The content of the file is newer. Compare / Overwrite"). This appears when a file is open in a tab with unsaved edits while something else (here, Claude) changes the same file on disk. Saving with **Overwrite** wrote the tab's older copy over the newer file. Two files were hit:
+
+- **`client/http.py`** went back to its step 4 version plus your one edit (a rewrapped comment above `__init__`). It lost `get_all` (step 11) and `cookie_summary` (step 13). Every client uses `get_all`, so the tools would have crashed in Claude Code; the offline test `test_get_all_follows_paging` caught it (1 failed).
+- **`docs/uni-copilot-project-plan.md`** went back to an early copy that held your own notes from the morning (Phase 0 "Done" lines, a better session open question, detailed watch-run facts) but none of the Phase 1 updates.
+
+**How it was repaired:**
+
+- `http.py`: restored the committed version, then re-applied your comment rewrap.
+- Plan doc: restored the committed version, then merged your notes back in. Where your wording covered the same point as mine, yours replaced mine: the Phase 0 roadmap lines, the session open question, and the Appendix A watch-run bullets (silent sign-in after ~13 h, the 10:12–14:12 run with 24/24 checks, `__cf_bm`, the untested no-calls case).
+
+**The folder move (yours, kept):** this log and the new `phase-1-core.md` now live in `docs/phase 1/`. Updated to match: the plan's status line, `phase-1-core.md` (all 16 steps done, plus corrections the build made later), and the note at the top of this log.
+
+**To avoid it next time:** when VS Code shows that panel, choose **Compare** (see both versions) or **Revert** (take the file on disk), not **Overwrite**. Or close a file's tab before Claude edits it.
+
+Test (PowerShell):
+
+```
+uv run pytest
+```
+
+Expect 78 passed, 4 skipped.
+
+Commit:
+
+```
+git add -A src/uni_copilot/ntulearn_mcp/client/http.py docs
+git commit -m "docs: move phase 1 docs into a folder and restore overwritten files"
 ```
 
 ## Phase 1 summary

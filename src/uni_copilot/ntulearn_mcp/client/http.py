@@ -67,8 +67,8 @@ class _Pacer:
 
 
 class NtuLearnHttp:
-    # Sets up one shared requests.Session (it keeps the cookie jar and reuses
-    # connections), the pacer, the concurrency limit and the login lock.
+    # Sets up one shared requests.Session (it keeps the cookie jar and reuses connections),
+    # the pacer, the concurrency limit and the login lock.
     # `signer` is the sign-in function; tests pass a fake one so no browser opens.
     def __init__(self, signer: Callable[..., LoginResult] = sign_in):
         self._signer = signer
