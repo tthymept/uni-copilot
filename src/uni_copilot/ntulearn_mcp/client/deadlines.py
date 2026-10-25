@@ -52,6 +52,7 @@ log = logging.getLogger(__name__)
 
 COLUMNS_TTL_S = 30 * 60
 MAX_DAYS = 120  # about one semester; the calendar splits it into 16-week windows anyway
+MAX_PAST_DAYS = 30  # how far back `past_days` may look (used by uni-copilot sync)
 
 
 # Builds DeadlineLists. Keeps the column cache, so the server creates one of
@@ -66,23 +67,28 @@ class DeadlinesClient:
 
     # The main entry point: everything due in the next `days` days for this
     # term's courses (or one course if `course` is given, e.g. "IE2108").
-    # Raises ValueError for a bad `days` or a course that matches 0 or 2+ subjects.
-    def upcoming(self, days: int = 7, course: str | None = None) -> DeadlineList:
+    # `past_days` also includes items due in the last N days (0 = from now on,
+    # what the tool uses; uni-copilot sync uses 14 to see "submitted -> graded").
+    # Raises ValueError for a bad `days`/`past_days` or a course that matches 0 or 2+ subjects.
+    def upcoming(self, days: int = 7, course: str | None = None, past_days: int = 0) -> DeadlineList:
         if not 1 <= days <= MAX_DAYS:
             raise ValueError(f"days must be between 1 and {MAX_DAYS}")
+        if not 0 <= past_days <= MAX_PAST_DAYS:
+            raise ValueError(f"past_days must be between 0 and {MAX_PAST_DAYS}")
         subjects = self._courses.pick(course)
         site_codes = {s.id: c.code for c in subjects for s in c.sites}
         now = datetime.now(timezone.utc)
+        since = now - timedelta(days=past_days)
         until = now + timedelta(days=days)
         notes: list[str] = []
 
         # 1. Calendar: one call (per 16 weeks) for every course.
         try:
-            cal = calendar_items(self._http, now, until)
+            cal = calendar_items(self._http, since, until)
         except NtuLearnError as e:
             cal = []
             notes.append(f"Calendar unavailable ({e.status}); using the gradebook only.")
-        other = sum(1 for i in cal if i.calendar_id not in site_codes and since_until(i.end, now, until))
+        other = sum(1 for i in cal if i.calendar_id not in site_codes and since_until(i.end, since, until))
         if other and course is None:
             notes.append(f"{other} item(s) from sites outside this term's courses were left out.")
 
@@ -96,7 +102,7 @@ class DeadlinesClient:
                              "items only in its gradebook may be missing.")
 
         # 3. Merge, then fetch your status only where something is due.
-        merged = merge_items(cal, columns, site_codes, now, until)
+        merged = merge_items(cal, columns, site_codes, since, until)
         statuses: dict[str, dict[str, SubmissionStatus] | None] = {}
         for site_id in sorted({m.course_site_id for m in merged}):
             try:
@@ -106,7 +112,7 @@ class DeadlinesClient:
                 notes.append(f"{site_codes[site_id]} status unavailable ({e.status}); shown as unknown.")
 
         deadlines = [with_status(m, site_codes, statuses) for m in merged]
-        log.info("deadlines: %d in %d day(s)", len(deadlines), days)
+        log.info("deadlines: %d in %d day(s), %d day(s) back", len(deadlines), days, past_days)
         return DeadlineList(days=days, deadlines=deadlines, notes=notes)
 
     # One site's due columns, from the cache if fetched less than 30 min ago.

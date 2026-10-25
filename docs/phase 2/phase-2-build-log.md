@@ -333,17 +333,101 @@ git add src/uni_copilot/sources src/uni_copilot/ntulearn_mcp/client/announcement
 git commit -m "feat(sources): convert ntulearn results to events with content hashes"
 ```
 
+## Step 5: store/sync.py (one full sync)
+
+**5a. `client/deadlines.py` (Phase 1): `upcoming(..., past_days=0)`.** New optional argument: also include items due in the last N days (0–30). The `upcoming_deadlines` tool doesn't pass it, so the tool behaves exactly as before. Sync uses 14, so a deadline from last week that goes "submitted → graded" is still seen.
+
+**5b. `store/events.py`: `BEGIN IMMEDIATE` at the start of `save_events`.** Takes the database's write lock *before* reading the stored events. If two syncs run at once (the scheduled one and yours), the second waits, then compares against the first's result. Without it, both could compare against the same old copy and write every "new" twice.
+
+**5c. New `src/uni_copilot/store/sync.py`.** `run_sync(conn)` runs the three sources one after the other. For each one:
+
+1. Fetch with the Phase 1 client (GET only, ~1 request/s).
+2. Convert with the step 4 adapters.
+3. `save_events(conn, events, now, covers)` (step 3, one transaction).
+4. Write four notes to `state`.
+
+One source failing doesn't stop the others.
+
+**What each sync covers:**
+
+```
+ntulearn_gradebook     due_at    from now − 14 days to now + 120 days
+ntulearn_announcement  posted_at from now − 30 days to now
+ntulearn_message       posted_at from now − 30 days to now
+```
+
+**The safety rules (who may be marked "removed"):**
+
+- **`failed_courses(notes, codes)`** reads Phase 1's `notes`. A note with "unavailable" or "couldn't be read" that starts with a course code means that course failed. A failure that isn't about one course (e.g. "Calendar unavailable") returns `None`, meaning the whole source counts as failed.
+- **`make_covers(...)`** builds the `covers` rule for `save_events`. A stored event that's missing from the fetch is "removed" only if all of these hold:
+  - it belongs to this source;
+  - its course is a current course (so old-term items aren't "removed" when a new semester starts);
+  - its course didn't fail this time;
+  - its time is inside the window, at least 1 hour (`EDGE_MARGIN`) from either edge.
+  - If the whole source failed, `covers` is `None` and nothing is removed.
+- **Why the 1-hour margin:** each Phase 1 client works out "now" a few seconds after sync does, so its window edges are slightly different. Without the margin, an item exactly at the edge could be missed by the client yet counted as covered by us, which would look like a removal.
+- **`keep_known_status(...)`:** if NTULearn couldn't give a deadline's status this time (`unknown`), the status already stored is kept. A hiccup never shows up as "submitted → open".
+
+**State notes per source** (read later by `pilot-mcp`):
+- `last_attempt:<source>`: when it was tried.
+- `last_sync:<source>`: when it last worked. This is the **"as of" time**.
+- `last_error:<source>`: `""` if it worked, otherwise a short error line (type + message, no secrets).
+- `last_notes:<source>`: the courses that couldn't be read.
+
+**Other pieces:** `SourceReport` (how one source went: `ok`, `seen`, `counts`, `notes`, `error`, `removals_checked`, `seconds`), `Clients` + `make_clients()` (the Phase 1 clients built the same way `server.py` builds them, sharing one sign-in and one pacer).
+
+**How it connects:**
+
+```
+run_sync(conn)
+  ├─ http.ensure_signed_in(), courses.list_courses() → this term's codes
+  └─ for each source: _run_source(...)
+       ├─ fetch: DeadlinesClient.upcoming(120, past_days=14) / AnnouncementsClient.recent(30) / MessagesClient.recent(30)
+       ├─ sources/ntulearn.py: *_to_events(...)
+       ├─ failed_courses(notes) → make_covers(...)
+       ├─ store/events.py: save_events(conn, events, now, covers)
+       └─ _save_state: last_attempt / last_sync / last_error / last_notes
+  → list[SourceReport]   (printed by `uni-copilot sync`, step 6)
+```
+
+Test (PowerShell, live, GET only, counts only):
+
+```
+uv run python -m uni_copilot.store.sync
+uv run pytest
+```
+
+This runs **two syncs in a row into a database in memory** (about 2 minutes, nothing saved). On 25 Oct:
+
+```
+1) gradebook 27 s seen 34 {'new': 34}, announcements 16 s seen 31 {'new': 31}, messages 20 s seen 15 {'new': 15}
+2) gradebook 11 s seen 34 no changes, announcements 16 s seen 31 no changes, messages 20 s seen 15 no changes
+Store now holds 80 events and 80 diary lines.
+```
+
+**The second sync reported no changes: the Phase 2 "done" test passes** (in memory; the CLI version is step 6). It also shows the hashes are stable across two real fetches, and cross-posted announcements kept the same id. Deadlines went from 28 to 34 because of the 14-day look-back. The second gradebook run is faster because the columns are cached in memory for 30 minutes.
+
+`--real` runs one sync into `.data/uni-copilot.sqlite`. You can do that now, or wait for `uni-copilot sync` in step 6.
+
+Commit:
+
+```
+git add src/uni_copilot/store/sync.py src/uni_copilot/store/events.py src/uni_copilot/ntulearn_mcp/client/deadlines.py "docs/phase 2"
+git commit -m "feat(store): sync ntulearn sources into the event store"
+```
+
 ## Open items
 
 Not verified yet. Each is checked in the step named in `phase-2-core.md` ("Things to check during Phase 2").
 
-- Hash stability across re-fetches (steps 4–6).
-- Sync time, expected about 1 minute (step 5).
+- ~~Hash stability across re-fetches~~: verified 25 Oct (step 5), two live syncs in a row → no changes.
+- ~~Sync time~~: verified 25 Oct (step 5), ~63 s first run, ~47 s with the gradebook columns cached.
+- **Only tested with everything working.** The failure rules (failed course, failed calendar, unknown status) are tested offline in step 11, not live: we don't break NTULearn on purpose.
 - Sessions 2 hours apart, and headless sign-in from Task Scheduler (step 12).
 - Whether Claude Code picks the `weekly-actions` skill for a plain question (step 10).
 - Whether Claude states "as of" in every answer (step 13).
 - **A deadline moved far outside the sync window** (e.g. to +5 months) disappears from the fetch while its *stored* due date is still inside the window, so step 5 would mark it removed rather than moved. Rare; when it comes back into the window it reappears as `new` (before = "removed"). Revisit if it ever happens.
-- **Which id a merged cross-post keeps.** Phase 1's `merge_duplicates` keeps the newest copy's id. If two copies have the same time, the order sites are fetched in decides. If that ever flips between syncs, it would look like "removed" + "new". Checked by the two-syncs test in step 6.
+- **Which id a merged cross-post keeps.** Phase 1's `merge_duplicates` keeps the newest copy's id. If two copies have the same time, the order sites are fetched in decides. If that ever flips between syncs, it would look like "removed" + "new". Stable in the step 5 two-syncs test; keep an eye on it.
 - **Later (noted 25 Oct):** a live `get_announcement(id)` tool in `ntulearn-mcp` (maybe `get_message` too): fetch one post by id instead of a whole course's list. Recorded in the plan, section 4.1 "News". Not needed in Phase 2, because `get_event` serves full bodies from the store.
 
 ## Concepts
@@ -374,5 +458,7 @@ Not verified yet. Each is checked in the step named in `phase-2-core.md` ("Thing
 - **Adapter:** a small function that converts one shape into another (`Deadline` → `Event`).
 - **Hash / SHA-256 / `hashlib`:** a fingerprint of text: same text → same 64-character code, any change → a different one. `hashlib` is Python's built-in module for it.
 - **Separator:** a character put between parts before hashing so different splits can't give the same text.
+- **Write lock / `BEGIN IMMEDIATE`:** only one program may write to a SQLite file at a time. `BEGIN IMMEDIATE` takes that lock at the start of a transaction instead of at the first write.
+- **Closure:** a function made inside another function that remembers its variables. `make_covers` returns `covers`, which remembers `source`, the window and the failed courses.
 - **Callable / passing a function:** `covers` is a function handed to `save_events`, so the caller decides the rule and `events.py` just applies it.
 - **Bookkeeping fields:** fields our own code fills (`first_seen_at`, ...), as opposed to fields that come from the source (`title`, `due_at`).

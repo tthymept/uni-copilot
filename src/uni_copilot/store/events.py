@@ -134,6 +134,10 @@ def save_events(
 
     result = SaveResult(seen=len(fetched))
     with conn:  # one transaction: COMMIT at the end, ROLLBACK if anything raises
+        # Take the write lock BEFORE reading, so if two syncs run at once (the
+        # scheduled one and yours) the second waits and then sees the first's
+        # result, instead of both comparing against the same old copy.
+        conn.execute("BEGIN IMMEDIATE")
         stored = load_events(conn)
 
         for new in fetched:

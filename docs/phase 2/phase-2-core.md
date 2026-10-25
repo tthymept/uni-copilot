@@ -1,6 +1,6 @@
 # Phase 2: event store
 
-Status (25 Oct 2026): steps 0–4 done, decisions made (below). Next: step 5. Full details of every step: `phase-2-build-log.md` in this folder.
+Status (25 Oct 2026): steps 0–5 done, decisions made (below). Next: step 6. Full details of every step: `phase-2-build-log.md` in this folder.
 
 ## What Phase 2 builds
 
@@ -76,7 +76,7 @@ One file per step. You test each step before the next, like Phase 1.
 2. `src/uni_copilot/store/db.py`: opens the SQLite file, creates the tables (`events`, `event_changes`, `state`) and indexes, and upgrades the schema with a version number (`PRAGMA user_version`) so later phases can add tables safely. Also converts Events/Changes to rows and back, and reads/writes `state`. Test: create the database and list its tables. **Done.**
 3. `src/uni_copilot/store/events.py`: **the heart of Phase 2.** `upsert` (insert a new event or update an existing one, matched by `event_id`) and **change detection**: compare the new version with the stored one and record `new`, `edited`, `moved` (due time changed), `status_changed` or `removed`. All changes from one sync are saved in one **transaction** (all or nothing). Removal only for what the caller says the sync covered (`covers`). Offline self-test with five made-up syncs. **Done.**
 4. `src/uni_copilot/sources/ntulearn.py`: **adapters** that turn Phase 1 results into events: `Deadline` → `ntulearn_gradebook:<column id>`, `Announcement` → `ntulearn_announcement:<id>`, `Message` → `ntulearn_message:<id>`. Also the `content_hash` (a fingerprint of the fields that matter, so a real edit changes it but re-fetching the same thing doesn't). Plus: Phase 1's body limit raised from 4000 to 20 000 characters (it cut 1 real announcement), so the store really keeps full bodies. Offline and live (counts only) self-test. **Done.**
-5. `src/uni_copilot/store/sync.py`: runs each source, saves the events, and records per-source sync state. Two safety rules: a source that **failed** (or a course in its `notes`) never marks its events as removed, and an item that only **left the time window** is not "removed". Needs a small addition to Phase 1's `DeadlinesClient` so it can also look back 14 days (today it only looks forward). Live self-test (GET only, counts only).
+5. `src/uni_copilot/store/sync.py`: runs each source, saves the events, and records per-source sync state. Two safety rules: a source that **failed** (or a course in its `notes`) never marks its events as removed, and an item that only **left the time window** is not "removed". Also: a deadline whose status couldn't be read keeps its known status. Small additions: `DeadlinesClient.upcoming(past_days=14)` (Phase 1) and a write lock in `save_events` (two syncs at once). Live self-test (GET only, counts only): two syncs in memory, the second reported no changes. **Done.**
 6. `src/uni_copilot/cli.py`: the `uni-copilot` command: `uni-copilot sync` (prints counts per source and per change type) and `uni-copilot events` (a quick look at the store, codes and dates only). Replaces the placeholder `uni_copilot:main`. Test: run sync twice.
 7. `src/uni_copilot/store/queries.py`: the read side: upcoming events by days/kind/course, changes since a time, the "last seen" bookmark per channel, and the "as of" time (last successful sync per source). Offline tests.
 8. `src/uni_copilot/pilot_mcp/server.py`: the second MCP server with `list_events` (titles + preview, compact), `whats_new` (changed items with their full bodies), `get_event` (one item in full), `sync_status` (last sync time, failed sources) and `mark_seen`. Every result carries `as_of` (UTC + SGT), and the instructions tell Claude to state it in every answer. Output models with SGT times and UNTRUSTED labels, like Phase 1. Test: self-test and the MCP Inspector.
@@ -108,8 +108,8 @@ Made 25 Oct 2026 (all as recommended, plus freshness). Also recorded in the plan
 
 Not verified yet; each is checked in the step named.
 
-- **Hash stability (steps 4–6):** re-fetching the same announcement or deadline must give the same `content_hash`. Fields that change by themselves (e.g. `is_read`, which source a deadline came from, SGT text) must not be part of it, or every sync would report fake edits.
-- **Sync time (step 5):** expected about 1 minute (deadlines ~20 s, announcements ~17 s, messages ~20 s at ~1 request/s).
+- **Hash stability (steps 4–6):** re-fetching the same announcement or deadline must give the same `content_hash`. Fields that change by themselves (e.g. `is_read`, which source a deadline came from, SGT text) must not be part of it, or every sync would report fake edits. Verified 25 Oct (step 5): two live syncs in a row → no changes.
+- **Sync time (step 5):** expected about 1 minute. Verified 25 Oct: ~63 s (deadlines 27 s, announcements 16 s, messages 20 s).
 - **Sessions 2 hours apart (step 12):** an open question in the plan. Silent re-login on 401 (Phase 1) should cover it; the scheduled runs will show.
 - **Headless sign-in from Task Scheduler (step 12):** verified from a terminal, not from a scheduled task (which may run without your desktop session).
 - **Skills picked automatically (step 10):** whether Claude Code uses the skill for a plain question without a slash command.
