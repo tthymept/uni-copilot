@@ -90,3 +90,47 @@ def make_courses() -> Callable[..., tuple[CoursesClient, FakeHttp]]:
 # ISO time string like NTULearn sends ("...Z"), `hours` from now.
 def iso(hours: float) -> str:
     return (NOW + timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+# ---------- Phase 2: the event store ----------
+
+# A fixed "now" for store tests (Sun 25 Oct 2026, 12:00 SGT), so results don't
+# depend on when the tests run.
+T0 = datetime(2026, 10, 25, 4, 0, tzinfo=timezone.utc)
+
+
+# A fresh database in memory for one test: tables created, nothing saved to disk.
+@pytest.fixture
+def db():
+    from uni_copilot.store.db import open_db
+
+    conn = open_db(":memory:")
+    yield conn
+    conn.close()
+
+
+# A made-up deadline Event, due `days` after T0.
+def deadline_event(n: int, days: float, status: str = "open", course: str = "XX1001", title: str | None = None):
+    from uni_copilot.store.models import Event
+
+    title = title or f"Made-up Assignment {n}"
+    return Event(
+        event_id=f"ntulearn_gradebook:_{n}_1", source="ntulearn_gradebook", kind="deadline",
+        course_code=course, course_site_id="_10_1", title=title,
+        due_at=T0 + timedelta(days=days), status=status, content_hash=f"hash:{title}",
+        found_in=("calendar", "gradebook"),
+    )
+
+
+# A made-up announcement (or message) Event, posted `days` before T0.
+def post_event(n: int, days_ago: float, body: str = "Made-up body.", course: str = "XX1001",
+               kind: str = "announcement", title: str | None = None):
+    from uni_copilot.store.models import Event
+
+    source = "ntulearn_announcement" if kind == "announcement" else "ntulearn_message"
+    title = title or f"Made-up post {n}"
+    return Event(
+        event_id=f"{source}:_{n}_1", source=source, kind=kind,
+        course_code=course, course_site_id="_10_1", title=title, body=body,
+        posted_at=T0 - timedelta(days=days_ago), content_hash=f"hash:{title}:{body}",
+    )

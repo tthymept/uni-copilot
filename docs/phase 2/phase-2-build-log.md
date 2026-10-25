@@ -761,13 +761,108 @@ git add .claude/skills CLAUDE.md src/uni_copilot/ntulearn_mcp/server.py src/uni_
 git commit -m "feat(skills): add weekly-actions skill and make pilot the default"
 ```
 
+## Step 11: tests/ (offline tests for everything in Phase 2)
+
+All synthetic (made-up courses XX1001 / YY2002 / ZZ3003, made-up titles), all offline, every database in memory or in a temp folder. **61 new tests**, 139 in total.
+
+**11a. `tests/conftest.py`:** Phase 2 helpers added under the Phase 1 ones:
+- `T0`, a fixed "now" (Sun 25 Oct 2026, 12:00 SGT), so results never depend on when the tests run;
+- the `db` fixture, a fresh in-memory store per test;
+- `deadline_event(n, days, status, course)` and `post_event(n, days_ago, body, course, kind)`, made-up Events.
+
+**11b. `tests/test_store.py` (19 tests):** steps 1–3.
+- **Models:**
+  - a time without a timezone, an SGT time, a wrong-source id or an empty id are rejected;
+  - the full body is kept and `preview` is ≤ 280 characters on one line.
+- **Database:**
+  - version 1 with three tables, and migrating again does nothing;
+  - an exact round trip (down to the microsecond);
+  - the time text sorts in time order;
+  - the state upsert;
+  - the foreign key refuses a diary line for an unknown event.
+- **`save_events` / `diff`:**
+  - first save is all `new`, with bookkeeping filled;
+  - **the same data twice → no changes** (the done test), `last_seen_at` moves but `modified_at` doesn't;
+  - `moved` (both times) and `status_changed` (both words);
+  - `edited` (titles only when the title changed);
+  - several changes at once;
+  - url/`found_in` aren't changes;
+  - no `covers` → nothing removed;
+  - removed only if covered, and only once;
+  - comes back → `new` with before = "removed";
+  - duplicate ids refused;
+  - a crash half-way rolls everything back.
+
+**11c. `tests/test_sources.py` (10 tests):** step 4.
+- The three adapters (ids, times, `found_in` sorted, link).
+- All 5 status mappings.
+- The hash changes for a body or title edit, but **not** for re-fetching, an extra site, `is_read`, `sources` or status.
+- The separator keeps `("ab","c")` ≠ `("a","bc")`.
+- Message titles.
+
+**11d. `tests/test_sync.py` (14 tests):** step 5, with **fake Phase 1 clients** (`Fake.clients()` builds a `Clients` whose methods answer from lists set in the test, or raise a chosen error). These are the failure cases we never try live:
+- `is_failure`, `failed_courses` (one course / the calendar → whole source / an informational note / longest code wins);
+- `make_covers` (inside → covered; a failed course, a non-current course, another source, outside the window and within the 1-hour margin → not covered);
+- `keep_known_status`;
+- whole runs:
+  - two identical syncs → 0 changes, state notes written;
+  - a post gone → `removed`;
+  - a post gone while its course failed → kept, note saved;
+  - the calendar failed → removals skipped for deadlines;
+  - a post that left the 30-day window → kept;
+  - messages raising → the other two still sync, and messages keeps its old "as of", error and data;
+  - not signed in → every source fails, nothing saved;
+  - "unknown" doesn't undo "submitted", but a real change still shows;
+  - the event ids.
+
+**11e. `tests/test_queries.py` (8 tests):** step 7.
+- `list_events` windows (removed and past items left out), filters (kind, part of a code in any case) and order.
+- `whats_new` after a bookmark (the status change and the new post, not the first-sync import).
+- A channel that never looked sees the last 7 days.
+- Bookmarks per channel (`whats_new` doesn't move them; `mark_seen` moves only its own).
+- `freshness` (oldest source wins, `None` if never synced, errors listed).
+- `get_event`.
+
+**11f. `tests/test_pilot.py` (10 tests):** steps 6, 8 and 9. A made-up store in a temp file (times relative to the real clock, because the pilot tools use it), with `server.DB` pointed at it:
+- **Tools:**
+  - exactly 5, all read-only except `mark_seen`, none open-world;
+  - `list_events` has `as_of` and no bodies;
+  - `get_event` gives the full body, or "No event";
+  - `whats_new` → moved (SGT text) + new post with its body; then `mark_seen(up_to=checked_at)` → empty, while telegram still sees 2;
+  - a future bookmark is capped;
+  - `sync_status`.
+- **Config:** `settings.json` pre-allows exactly the 5 pilot tools; `.mcp.json` starts `pilot-mcp`.
+- **CLI:** `status` without a store → exit code 1; `status` / `events --kind deadline` / `changes` on the store (the "first sync" summary line, the moved line); `ago`.
+
+**Checking the tests catch real bugs.** Two safety rules in `sync.py` were broken on purpose, then restored with `git checkout`:
+- "a failed course isn't covered" broken → 2 tests failed;
+- "keep the known status" broken → 2 tests failed.
+
+A test that still passes when the code is wrong proves nothing, and these don't.
+
+Test (PowerShell):
+
+```
+uv run pytest
+uv run pytest tests/test_sync.py -v
+```
+
+Expect `139 passed, 4 skipped` (the 4 are the opt-in live tests), in about a second. `-v` lists each test by name.
+
+Commit:
+
+```
+git add tests "docs/phase 2"
+git commit -m "test(store): add offline tests for store, sync, queries and pilot"
+```
+
 ## Open items
 
 Not verified yet. Each is checked in the step named in `phase-2-core.md` ("Things to check during Phase 2").
 
 - ~~Hash stability across re-fetches~~: verified 25 Oct (step 5), two live syncs in a row → no changes.
 - ~~Sync time~~: verified 25 Oct (step 5), ~63 s first run, ~47 s with the gradebook columns cached.
-- **Only tested with everything working.** The failure rules (failed course, failed calendar, unknown status) are tested offline in step 11, not live: we don't break NTULearn on purpose.
+- **Failure rules only tested offline.** Failed course, failed calendar, failed source, sign-in failure and unknown status are covered by `tests/test_sync.py` with fake clients (step 11), not live: we don't break NTULearn on purpose. The real wording of NTULearn's failure notes comes from Phase 1's code, so a test can't drift from it unless that code changes.
 - Sessions 2 hours apart, and headless sign-in from Task Scheduler (step 12).
 - Whether Claude Code picks the `weekly-actions` skill for a plain question (step 10).
 - Whether Claude states "as of" in every answer (step 13).
@@ -805,6 +900,9 @@ Not verified yet. Each is checked in the step named in `phase-2-core.md` ("Thing
 - **Separator:** a character put between parts before hashing so different splits can't give the same text.
 - **Write lock / `BEGIN IMMEDIATE`:** only one program may write to a SQLite file at a time. `BEGIN IMMEDIATE` takes that lock at the start of a transaction instead of at the first write.
 - **Closure:** a function made inside another function that remembers its variables. `make_covers` returns `covers`, which remembers `source`, the window and the failed courses.
+- **Fake (test double):** an object with the same methods as the real one that answers from made-up data (`Fake.clients()` in `test_sync.py`, `FakeHttp` in Phase 1).
+- **`tmp_path` / `capsys`:** pytest fixtures: a temporary folder deleted after the test / the text a test printed.
+- **Breaking code on purpose (mutation check):** change a rule, run the tests, expect failures, put the code back. It shows the tests really guard that rule.
 - **JOIN:** SQL that puts rows of two tables side by side where a column matches (`event_changes.event_id = events.event_id`).
 - **`LIKE '%da3%'`:** SQL text matching; `%` means "anything here". Case-insensitive for English letters in SQLite.
 - **`GROUP BY` + `MIN(...)`:** one result per group (per source), here the earliest diary time.
