@@ -856,6 +856,84 @@ git add tests "docs/phase 2"
 git commit -m "test(store): add offline tests for store, sync, queries and pilot"
 ```
 
+## Step 12: scheduled sync with Task Scheduler (optional)
+
+**Your choices (25 Oct):**
+- every 2 hours, 07:00–23:00 (the plan), not hourly;
+- on your PC with Task Scheduler, not GitHub Actions. A cloud runner would need your Microsoft sign-in cookies uploaded to GitHub, would sign in from foreign data-centre IPs (likely MFA/risky-sign-in blocks), and would put your course data on someone else's servers;
+- syncing costs **0 Claude tokens**: it's a plain script, and tokens are only used when you ask Claude something.
+
+**12a. `cli.py`: `--log FILE`.** It goes before the command: `uni-copilot --log .data\sync.log sync`.
+- Everything the command prints is added to the end of the file instead of the screen, between a `=== <time> uni-copilot sync` line and an `=== exit code N` line.
+- A crash is still written to the log (`=== CRASHED: ...`, exit code 2).
+- The file is git-ignored (in `.data/`). Past 1 MB (about two years of runs) it's renamed to `sync.log.old` and a new one starts.
+- Why: the task runs `pythonw.exe`, Python **without a console window** (so nothing pops up every 2 hours). It has no screen to print to.
+
+**12b. New `scripts/schedule-sync.ps1`: registers the task.** It uses PowerShell's ScheduledTasks cmdlets.
+- **Action:** `.venv\Scripts\pythonw.exe -m uni_copilot.cli --log "<project>\.data\sync.log" sync`, run in the project folder. It calls the venv's Python directly, so there's no `uv` in between (no `uv sync`, so no "ntulearn-mcp.exe in use" problem while Claude Code is open).
+- **Trigger:** daily at 07:00, repeating every 2 hours for 16 h 1 min → 07, 09, ..., 23 (9 runs a day).
+- **Settings:**
+  - `-StartWhenAvailable`: a missed run (PC off or asleep) runs as soon as possible;
+  - runs on battery;
+  - `-MultipleInstances IgnoreNew`: never two syncs at once;
+  - stops a run after 15 minutes;
+  - `-Wake` (optional): wake the PC from sleep for a run.
+- **Account:** your user, only while you're signed in to Windows. Sync needs your browser profile in `.auth\`, which belongs to your session.
+- **Switches:** `-DryRun` (show, change nothing), `-RunNow` (register, then start one run), `-Wake`, `-Remove` (delete the task).
+- Run with `powershell -ExecutionPolicy Bypass -File ...`: Windows blocks unsigned `.ps1` scripts by default, and this allows just this one run.
+
+**Verified (25 Oct), before registering anything:**
+- `-DryRun` and `-DryRun -Wake` build the action, trigger and settings without errors.
+- A windowless `pythonw` run (started with `Start-Process -Wait`, into a scratch database) **signed in silently and synced**: 34 / 30 / 15 in about 63 s, exit code 0, all output in the log.
+
+**Not verified yet:**
+- the run started *by Task Scheduler itself* (`-RunNow`);
+- a run after hours of no activity (the plan's session open question);
+- whether your laptop honours `-Wake`.
+
+The first is checked by your test below; the other two over the next days via `.data\sync.log`.
+
+**How it connects:**
+
+```
+Task Scheduler (07:00, 09:00, ... 23:00, or right after a missed run)
+  └─ .venv\Scripts\pythonw.exe -m uni_copilot.cli --log .data\sync.log sync     (no window)
+       └─ cli.main → open_log → cmd_sync → store.sync.run_sync → steps 2–5
+            └─ .data\uni-copilot.sqlite  ◄── pilot-mcp reads it ("as of" = this run's time)
+```
+
+Test (PowerShell, project folder):
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\schedule-sync.ps1 -DryRun
+powershell -ExecutionPolicy Bypass -File scripts\schedule-sync.ps1 -RunNow
+```
+
+Wait about a minute, then:
+
+```
+Get-Content .data\sync.log -Tail 8
+Get-ScheduledTaskInfo -TaskName "uni-copilot sync"
+uv run uni-copilot status
+```
+
+Expect:
+- "Registered 'uni-copilot sync'. Next run: <the next odd hour>".
+- In the log: `=== ... uni-copilot sync`, three source lines, `Done. As of ...`, `=== exit code 0`.
+- `LastTaskResult : 0` (the exit code; 267009 means it's still running).
+- `status` says "as of" the time you ran it.
+- No window should appear during the run.
+- Also open the **Task Scheduler** app → Task Scheduler Library → "uni-copilot sync" to see it there.
+
+To try waking from sleep: register again with `-Wake`, put the laptop to sleep (plugged in) before an odd hour, and check the log afterwards. Remove the task at any time with `-Remove`.
+
+Commit:
+
+```
+git add scripts/schedule-sync.ps1 src/uni_copilot/cli.py CLAUDE.md "docs/phase 2"
+git commit -m "feat(cli): add log option and scheduled sync task script"
+```
+
 ## Open items
 
 Not verified yet. Each is checked in the step named in `phase-2-core.md` ("Things to check during Phase 2").
@@ -863,7 +941,8 @@ Not verified yet. Each is checked in the step named in `phase-2-core.md` ("Thing
 - ~~Hash stability across re-fetches~~: verified 25 Oct (step 5), two live syncs in a row → no changes.
 - ~~Sync time~~: verified 25 Oct (step 5), ~63 s first run, ~47 s with the gradebook columns cached.
 - **Failure rules only tested offline.** Failed course, failed calendar, failed source, sign-in failure and unknown status are covered by `tests/test_sync.py` with fake clients (step 11), not live: we don't break NTULearn on purpose. The real wording of NTULearn's failure notes comes from Phase 1's code, so a test can't drift from it unless that code changes.
-- Sessions 2 hours apart, and headless sign-in from Task Scheduler (step 12).
+- Sessions 2 hours apart, and headless sign-in from Task Scheduler (step 12). A windowless `pythonw` run signed in silently (25 Oct). A run started by Task Scheduler itself, and runs after a long idle gap, are checked via `.data\sync.log` once the task is registered.
+- Whether the laptop wakes from sleep for a run (`-Wake`).
 - Whether Claude Code picks the `weekly-actions` skill for a plain question (step 10).
 - Whether Claude states "as of" in every answer (step 13).
 - **A deadline moved far outside the sync window** (e.g. to +5 months) disappears from the fetch while its *stored* due date is still inside the window, so step 5 would mark it removed rather than moved. Rare; when it comes back into the window it reappears as `new` (before = "removed"). Revisit if it ever happens.
@@ -900,6 +979,10 @@ Not verified yet. Each is checked in the step named in `phase-2-core.md` ("Thing
 - **Separator:** a character put between parts before hashing so different splits can't give the same text.
 - **Write lock / `BEGIN IMMEDIATE`:** only one program may write to a SQLite file at a time. `BEGIN IMMEDIATE` takes that lock at the start of a transaction instead of at the first write.
 - **Closure:** a function made inside another function that remembers its variables. `make_covers` returns `covers`, which remembers `source`, the window and the failed courses.
+- **Task Scheduler / task / trigger / action:** Windows' built-in timetable / one scheduled job / when it runs / what it runs.
+- **`pythonw.exe`:** Python without a console window, for background jobs; it has no screen, so output goes to a log file.
+- **Log file:** a text file a program adds lines to, so you can see later what happened while you weren't watching.
+- **Execution policy:** Windows' rule about which PowerShell scripts may run; `-ExecutionPolicy Bypass` allows one run of one script.
 - **Fake (test double):** an object with the same methods as the real one that answers from made-up data (`Fake.clients()` in `test_sync.py`, `FakeHttp` in Phase 1).
 - **`tmp_path` / `capsys`:** pytest fixtures: a temporary folder deleted after the test / the text a test printed.
 - **Breaking code on purpose (mutation check):** change a rule, run the tests, expect failures, put the code back. It shows the tests really guard that rule.

@@ -1,6 +1,6 @@
 # Phase 2: event store
 
-Status (25 Oct 2026): steps 0–11 done, decisions made (below). Next: step 12. Full details of every step: `phase-2-build-log.md` in this folder.
+Status (25 Oct 2026): steps 0–12 done, decisions made (below). Next: step 13 (final check). Full details of every step: `phase-2-build-log.md` in this folder.
 
 ## What Phase 2 builds
 
@@ -83,7 +83,7 @@ One file per step. You test each step before the next, like Phase 1.
 9. `pyproject.toml`, `.mcp.json`, `.claude/settings.json`: add the `pilot-mcp` command, register the `pilot` server with Claude Code, and pre-allow its tools (the read-only ones plus `mark_seen`, which only moves a local bookmark). **Done.**
 10. `.claude/skills/weekly-actions/SKILL.md`: the `weekly_actions` workflow: deadlines not yet submitted + announcements (~3 weeks) + messages + a logistics check for tests this week ("matric", "calculator", "venue", "bring") → a checklist with sources and the "as of" time; inferred items marked as inferred. Plus routing: pilot is the default for study questions (server instructions + `CLAUDE.md`), so nobody has to type "using pilot", on Telegram either. **Done** (live check pending: does Claude pick the skill by itself?).
 11. `tests/`: store tests (dedupe, edits, moved deadlines, status changes, removed items, failed source doesn't remove, window exit isn't removal, two identical syncs → 0 changes, `whats_new` after a bookmark), adapter tests, pilot tool tests. All synthetic. 61 new tests (139 in total); the sync failure rules use fake Phase 1 clients. **Done.**
-12. Optional: Windows Task Scheduler runs `uni-copilot sync` every 2 hours (07:00–23:00), so the store stays fresh without you. Checks that silent sign-in works from a scheduled task.
+12. Optional: Windows Task Scheduler runs `uni-copilot sync` every 2 hours (07:00–23:00), so the store stays fresh without you. Checks that silent sign-in works from a scheduled task. Built as `scripts/schedule-sync.ps1` (`-DryRun`, `-RunNow`, `-Wake`, `-Remove`) + `uni-copilot --log FILE`; runs windowless with `pythonw`, catches up after missed runs. On your PC, not GitHub Actions (sign-in cookies and course data stay local). **Done** (Task Scheduler run itself: your test).
 13. Final check: two syncs in a row → only real changes; then ask Claude Code "what's due this week?" and "what's new?" and check the answers come from `pilot` instantly, say "as of", and match NTULearn.
 
 Commit status: Phase 1 is committed up to `90bdd5d`. The Phase 1 docs move, the repair of the two overwritten files and Phase 2 step 0 go in the next commit.

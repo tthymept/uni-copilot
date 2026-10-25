@@ -20,6 +20,10 @@ How a command reaches the code (same idea as the MCP tools in Phase 1):
 
 Exit code (what Task Scheduler sees in step 12): 0 = every source worked,
 1 = at least one source failed (its old data is kept, nothing marked removed).
+
+--log FILE (step 12): everything the command prints goes to the end of FILE
+instead of the screen, starting with a time stamp line. The scheduled task
+runs with pythonw.exe (no window), which has no screen to print to.
 """
 
 import argparse
@@ -33,6 +37,8 @@ from uni_copilot.ntulearn_mcp.models import sgt_text
 from uni_copilot.store.db import DB_PATH, get_state, open_db, schema_version, time_from_db
 from uni_copilot.store.queries import EventChange, changes_since, first_sync_times, freshness, is_first_sync, list_events
 from uni_copilot.store.sync import run_sync
+
+LOG_MAX_BYTES = 1_000_000  # ~1 MB, about two years of sync logs at 9 runs a day
 
 # Friendly names for the sources, in the order they're shown.
 SOURCE_LABELS = {
@@ -56,16 +62,44 @@ def main(argv: list[str] | None = None) -> int:
     events.add_argument("--course", help="part of a course code, e.g. DA3")
     changes = commands.add_parser("changes", help="the diary of changes, with titles")
     changes.add_argument("--days", type=int, default=7, help="changes found in the last N days (default 7)")
+    parser.add_argument("--log", type=Path, help="append all output to this file instead of the screen")
     args = parser.parse_args(argv)
 
+    if args.log is None:
+        return _run(args)
+    with open_log(args.log) as log_file:
+        sys.stdout = sys.stderr = log_file  # every print and warning now goes to the file
+        try:
+            print(f"=== {sgt_text(datetime.now(timezone.utc))}  uni-copilot {args.command}")
+            code = _run(args)
+            print(f"=== exit code {code}")
+            return code
+        except Exception as e:  # noqa: BLE001 - a crash must still end up in the log
+            print(f"=== CRASHED: {type(e).__name__}: {e}")
+            return 2
+        finally:
+            sys.stdout, sys.stderr = sys.__stdout__, sys.__stderr__
+
+
+# Runs the chosen command (after --log, if any, has redirected the output).
+def _run(args: argparse.Namespace) -> int:
     # Phase 1 clients log every step at INFO; for a command line only warnings matter.
-    logging.basicConfig(level=logging.WARNING, format="  [%(name)s] %(message)s")
+    logging.basicConfig(level=logging.WARNING, format="  [%(name)s] %(message)s", stream=sys.stderr, force=True)
     if args.command == "events":
         return cmd_events(args.db, args.days, args.kind, args.course)
     if args.command == "changes":
         return cmd_changes(args.db, args.days)
     run = {"sync": cmd_sync, "status": cmd_status}[args.command]
     return run(args.db)
+
+
+# Opens the log file for adding to its end. If it's grown past 1 MB, the old
+# one is kept as <name>.old (replacing any older one) and a new file starts.
+def open_log(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and path.stat().st_size > LOG_MAX_BYTES:
+        path.replace(path.with_name(path.name + ".old"))
+    return open(path, "a", encoding="utf-8")
 
 
 # `uni-copilot sync`: one full sync into the store, one line per source.
