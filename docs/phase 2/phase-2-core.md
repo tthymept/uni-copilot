@@ -1,6 +1,6 @@
 # Phase 2: event store
 
-Status (25 Oct 2026): steps 0–3 done, decisions made (below). Next: step 4. Full details of every step: `phase-2-build-log.md` in this folder.
+Status (25 Oct 2026): steps 0–4 done, decisions made (below). Next: step 5. Full details of every step: `phase-2-build-log.md` in this folder.
 
 ## What Phase 2 builds
 
@@ -41,6 +41,32 @@ The store isn't mainly about speed. It's **memory**: NTULearn never tells us whe
 
 Example: you ask at 10:00, an announcement is posted at 11:00, syncs run at 12:00 and 14:00, you ask "what's new?" at 15:00. The 12:00 sync writes "new: announcement" in the diary; the 14:00 sync writes nothing (correct). At 15:00, `whats_new` reads the diary after your 10:00 bookmark and finds it. Answer: "as of 14:00: 1 new announcement". `mark_seen` then moves your bookmark to 15:00.
 
+## What `content_hash` is
+
+A **fingerprint of an item's content**: a short code computed from its text, used to answer "did this change since the last sync?". A hash function (SHA-256, built into Python as `hashlib`) turns any text into a fixed-length code:
+
+```
+text                    length   hash (first 16 of 64 characters)
+"Quiz in LT1."          12       753eba7b0124e706
+"Quiz in LT1."          12       753eba7b0124e706   same text → same hash, always
+"Quiz in LT2."          12       4d62a86fd8cead2e   one character different → a totally different hash
+"Quiz in LT1. xxxx…"    5013     0bf539691ea3cc86   long text → still a short hash
+```
+
+Three properties make it useful: same input → same hash, every time and on every computer; any change, even one comma → a different hash (two different texts sharing a hash practically never happens); always 64 characters, however long the post.
+
+**How the store uses it:** the adapter (step 4) computes `content_hash` from the fields that count as "the content" and saves it with the event. Next sync, `diff()` (step 3) checks `old.content_hash != new.content_hash` → "edited".
+
+**What goes in, and what's deliberately left out** (step 4):
+
+- Deadline: the title. Not the due time or status (they have their own change types, `moved` and `status_changed`), not `found_in` (the calendar sometimes misses an item; that's not an edit).
+- Announcement: title + body (the Markdown body includes links and `[file: name]`). Not which sites it was found on.
+- Message: sender name + body. Not `is_read`, which flips when you open it.
+
+A field that changes by itself must never be in the hash, or every sync would report fake edits. That's why the hash exists even though full bodies are stored: it decides exactly what counts as an edit, and it works for future sources where we won't store the content (Phase 4 files and pages).
+
+A hash isn't encryption or a secret: it can't be turned back into the text. It's only a fingerprint for comparing.
+
 ## Steps
 
 One file per step. You test each step before the next, like Phase 1.
@@ -49,8 +75,8 @@ One file per step. You test each step before the next, like Phase 1.
 1. `src/uni_copilot/store/models.py`: the **event** shape (`event_id`, `source`, `kind`, `course_code`, `course_site_id`, `title`, `body`, `url`, `starts_at`, `due_at`, `posted_at`, `status`, `content_hash`, `found_in`, `first_seen_at`, `last_seen_at`, `modified_at`, `removed_at`) and the **change** shape (`event_id`, `change_type`, `changed_at`, what was before and after). Frozen dataclasses that reject non-UTC times and wrong ids. Offline self-test. **Done.**
 2. `src/uni_copilot/store/db.py`: opens the SQLite file, creates the tables (`events`, `event_changes`, `state`) and indexes, and upgrades the schema with a version number (`PRAGMA user_version`) so later phases can add tables safely. Also converts Events/Changes to rows and back, and reads/writes `state`. Test: create the database and list its tables. **Done.**
 3. `src/uni_copilot/store/events.py`: **the heart of Phase 2.** `upsert` (insert a new event or update an existing one, matched by `event_id`) and **change detection**: compare the new version with the stored one and record `new`, `edited`, `moved` (due time changed), `status_changed` or `removed`. All changes from one sync are saved in one **transaction** (all or nothing). Removal only for what the caller says the sync covered (`covers`). Offline self-test with five made-up syncs. **Done.**
-4. `src/uni_copilot/sources/ntulearn.py`: **adapters** that turn Phase 1 results into events: `Deadline` → `ntulearn_gradebook:<column id>`, `Announcement` → `ntulearn_announcement:<id>`, `Message` → `ntulearn_message:<id>`. Also the `content_hash` (a fingerprint of the fields that matter, so a real edit changes it but re-fetching the same thing doesn't). Offline self-test.
-5. `src/uni_copilot/store/sync.py`: runs each source, saves the events, and records per-source sync state. Two safety rules: a source that **failed** (or a course in its `notes`) never marks its events as removed, and an item that only **left the time window** is not "removed". Live self-test (GET only, counts only).
+4. `src/uni_copilot/sources/ntulearn.py`: **adapters** that turn Phase 1 results into events: `Deadline` → `ntulearn_gradebook:<column id>`, `Announcement` → `ntulearn_announcement:<id>`, `Message` → `ntulearn_message:<id>`. Also the `content_hash` (a fingerprint of the fields that matter, so a real edit changes it but re-fetching the same thing doesn't). Plus: Phase 1's body limit raised from 4000 to 20 000 characters (it cut 1 real announcement), so the store really keeps full bodies. Offline and live (counts only) self-test. **Done.**
+5. `src/uni_copilot/store/sync.py`: runs each source, saves the events, and records per-source sync state. Two safety rules: a source that **failed** (or a course in its `notes`) never marks its events as removed, and an item that only **left the time window** is not "removed". Needs a small addition to Phase 1's `DeadlinesClient` so it can also look back 14 days (today it only looks forward). Live self-test (GET only, counts only).
 6. `src/uni_copilot/cli.py`: the `uni-copilot` command: `uni-copilot sync` (prints counts per source and per change type) and `uni-copilot events` (a quick look at the store, codes and dates only). Replaces the placeholder `uni_copilot:main`. Test: run sync twice.
 7. `src/uni_copilot/store/queries.py`: the read side: upcoming events by days/kind/course, changes since a time, the "last seen" bookmark per channel, and the "as of" time (last successful sync per source). Offline tests.
 8. `src/uni_copilot/pilot_mcp/server.py`: the second MCP server with `list_events` (titles + preview, compact), `whats_new` (changed items with their full bodies), `get_event` (one item in full), `sync_status` (last sync time, failed sources) and `mark_seen`. Every result carries `as_of` (UTC + SGT), and the instructions tell Claude to state it in every answer. Output models with SGT times and UNTRUSTED labels, like Phase 1. Test: self-test and the MCP Inspector.

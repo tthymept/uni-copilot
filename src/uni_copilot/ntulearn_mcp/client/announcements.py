@@ -39,8 +39,10 @@ from uni_copilot.ntulearn_mcp.parsers.html import parse_html
 log = logging.getLogger(__name__)
 
 MAX_DAYS = 180
-# Longest body passed to Claude per announcement; longer ones are cut and marked.
-BODY_MAX_CHARS = 4000
+# Longest body kept per announcement; longer ones are cut and marked. Only a
+# safety net against huge pasted pages: on 25 Oct the longest of 114 posts was
+# ~4000 characters (the old limit cut 1 of them), median ~770.
+BODY_MAX_CHARS = 20_000
 
 
 # Fetches announcements for the tool. Holds no cache: announcements should

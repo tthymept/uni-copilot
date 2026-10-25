@@ -47,8 +47,10 @@ from uni_copilot.ntulearn_mcp.parsers.html import parse_html
 log = logging.getLogger(__name__)
 
 MAX_DAYS = 180
-# Longest body passed to Claude per message; longer ones are cut and marked.
-BODY_MAX_CHARS = 4000
+# Longest body kept per message; longer ones are cut and marked. Only a safety
+# net against huge pasted pages: on 25 Oct the longest of 25 messages was
+# ~3800 characters, median ~340.
+BODY_MAX_CHARS = 20_000
 
 
 # Fetches course messages for the tool. No cache, like announcements.

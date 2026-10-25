@@ -273,6 +273,66 @@ git add src/uni_copilot/store/events.py "docs/phase 2"
 git commit -m "feat(store): save events and record changes"
 ```
 
+## Step 4: sources/ntulearn.py (adapters and content_hash)
+
+**4a/4b. Phase 1 body limit raised: `BODY_MAX_CHARS` 4000 → 20 000** in `client/announcements.py` and `client/messages.py`. A live count (25 Oct, counts only) found the old limit cut 1 of 114 announcements (longest ~4000, median ~770; messages: longest ~3800, median ~340). Since the store now keeps full bodies (step 1 change), the limit is only a safety net against a huge pasted page. The live `ntulearn-mcp` tools also return full bodies now.
+
+**4c. New package `src/uni_copilot/sources/`, file `ntulearn.py`: the adapters.** An **adapter** is a small function that copies fields from one shape into another, like a travel plug adapter. Pure functions: no NTULearn, no database.
+
+- `deadline_to_event(d)` → `ntulearn_gradebook:<column id>`, kind `deadline`, `due_at`, `status` mapped by `STATUS_FROM_SUBMISSION`, `found_in` sorted (so "gradebook, calendar" and "calendar, gradebook" are the same).
+- `announcement_to_event(a)` → `ntulearn_announcement:<id>`, `body`, `posted_at = created_at`. A post merged from several sites keeps the first site for its link.
+- `message_to_event(m)` → `ntulearn_message:<id>`, `body`, `posted_at`. Messages have no title, so `message_title(m)` makes one: "Message from <sender>" or "Message from you".
+- `deadlines_to_events`, `announcements_to_events`, `messages_to_events`: whole lists.
+- `STATUS_FROM_SUBMISSION`: `not_submitted`/`unknown` → `open`, `submitted` → `submitted`, `graded` → `graded`, `exempt` → `done`.
+
+**`content_hash(*parts)`, the fingerprint** (concept explained in `phase-2-core.md`, "What `content_hash` is"): SHA-256 of the parts joined with an invisible separator character (`\x1f`), as 64 hex characters. The separator keeps parts apart: without it, `("ab", "c")` and `("a", "bc")` would join to the same "abc".
+
+What goes in:
+- Deadline: title.
+- Announcement: title + body.
+- Message: sender name + body.
+
+What's left out on purpose: due time and status (their own change types), `found_in`, the list of sites, `is_read`. These change without anyone editing anything.
+
+**How it connects:**
+
+```
+Phase 1 clients ──► DeadlineList / AnnouncementList / MessageList
+                         │  .deadlines / .announcements / .messages
+                         ▼
+sources/ntulearn.py ── *_to_events(...) ──► list[Event]   (content_hash filled, bookkeeping None)
+                         ▼
+store/events.py ────── save_events(conn, events, now, covers)   (step 5 calls this)
+```
+
+Test (PowerShell):
+
+```
+uv run python -m uni_copilot.sources.ntulearn
+uv run python -m uni_copilot.sources.ntulearn --live
+uv run pytest
+```
+
+Expect:
+- Offline:
+  - 1) three events (`ntulearn_gradebook:_999_1`, `ntulearn_announcement:_888_1`, `ntulearn_message:_777_1`), each with a hash; `found_in=('calendar', 'gradebook')`.
+  - 2) the status mapping.
+  - 3) True only for "one word of the body changed" and "title changed"; False for "same post fetched again", "found on a third site too", "message opened" and "deadline submitted".
+  - 4) `False`.
+- `--live` (GET only, about 1 minute, counts only). On 25 Oct: `{'deadline': 28, 'announcement': 31, 'message': 15}`, statuses `{'submitted': 1, 'open': 27}`, `duplicate event_ids: 0`, longest body 3839, cut by the safety limit 0.
+- `pytest`: 78 passed, 4 skipped.
+
+Duplicate ids must be 0, because `save_events` refuses a list with the same id twice.
+
+**For step 5:** `DeadlinesClient.upcoming(days)` only looks forward from now. The decision says deadlines from 14 days ago (so "submitted → graded" on recent items is still seen), so step 5 adds a small look-back option to it.
+
+Commit:
+
+```
+git add src/uni_copilot/sources src/uni_copilot/ntulearn_mcp/client/announcements.py src/uni_copilot/ntulearn_mcp/client/messages.py "docs/phase 2"
+git commit -m "feat(sources): convert ntulearn results to events with content hashes"
+```
+
 ## Open items
 
 Not verified yet. Each is checked in the step named in `phase-2-core.md` ("Things to check during Phase 2").
@@ -283,6 +343,7 @@ Not verified yet. Each is checked in the step named in `phase-2-core.md` ("Thing
 - Whether Claude Code picks the `weekly-actions` skill for a plain question (step 10).
 - Whether Claude states "as of" in every answer (step 13).
 - **A deadline moved far outside the sync window** (e.g. to +5 months) disappears from the fetch while its *stored* due date is still inside the window, so step 5 would mark it removed rather than moved. Rare; when it comes back into the window it reappears as `new` (before = "removed"). Revisit if it ever happens.
+- **Which id a merged cross-post keeps.** Phase 1's `merge_duplicates` keeps the newest copy's id. If two copies have the same time, the order sites are fetched in decides. If that ever flips between syncs, it would look like "removed" + "new". Checked by the two-syncs test in step 6.
 - **Later (noted 25 Oct):** a live `get_announcement(id)` tool in `ntulearn-mcp` (maybe `get_message` too): fetch one post by id instead of a whole course's list. Recorded in the plan, section 4.1 "News". Not needed in Phase 2, because `get_event` serves full bodies from the store.
 
 ## Concepts
@@ -310,5 +371,8 @@ Not verified yet. Each is checked in the step named in `phase-2-core.md` ("Thing
 - **Upsert in SQL:** `INSERT ... ON CONFLICT (key) DO UPDATE`.
 - **`with conn:`:** Python's `sqlite3` turns the block into one transaction: commit if it finishes, roll back if it raises.
 - **Idempotent:** doing it twice has the same effect as once. Two identical syncs → the second writes no diary lines.
+- **Adapter:** a small function that converts one shape into another (`Deadline` → `Event`).
+- **Hash / SHA-256 / `hashlib`:** a fingerprint of text: same text → same 64-character code, any change → a different one. `hashlib` is Python's built-in module for it.
+- **Separator:** a character put between parts before hashing so different splits can't give the same text.
 - **Callable / passing a function:** `covers` is a function handed to `save_events`, so the caller decides the rule and `events.py` just applies it.
 - **Bookkeeping fields:** fields our own code fills (`first_seen_at`, ...), as opposed to fields that come from the source (`title`, `due_at`).
