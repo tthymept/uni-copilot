@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.scripts]
-uni-copilot = "uni_copilot:main"
+uni-copilot = "uni_copilot.cli:main"
 ntulearn-mcp = "uni_copilot.ntulearn_mcp.server:main"
 
 [build-system]

@@ -416,6 +416,85 @@ git add src/uni_copilot/store/sync.py src/uni_copilot/store/events.py src/uni_co
 git commit -m "feat(store): sync ntulearn sources into the event store"
 ```
 
+## Step 6: cli.py (the `uni-copilot` command)
+
+**6a. `pyproject.toml`:** `uni-copilot = "uni_copilot.cli:main"` (was the placeholder `uni_copilot:main`, which printed "Hello from uni-copilot!").
+
+**6b. `src/uni_copilot/__init__.py`:** the placeholder `main()` replaced by a one-line package description, like the other packages.
+
+**6c. New `src/uni_copilot/cli.py`:**
+
+- **`main(argv)`** reads the words after `uni-copilot` with **argparse subcommands** (`sync`, `status`) and runs the matching function. It returns an **exit code**. A hidden `--db PATH` option lets tests use a temporary database.
+- **`cmd_sync(db)`**:
+  1. Opens the real store.
+  2. Takes the time stamp (`started`) and passes it to `run_sync(conn, now=started)`, so the printed "As of" is exactly the `last_sync` time saved in `state`.
+  3. Prints one line per source: time taken, items seen, changes by type (or "no changes"), and Phase 1's notes.
+  4. If a source failed, prints FAILED with the short error. If the error is a sign-in problem, it says to run the `login` tool.
+  5. Returns 0 if everything worked, 1 otherwise. Task Scheduler (step 12) will see that.
+- **`cmd_status(db)`**: per source, how many events are active (and stored in total, including removed ones), "as of <last sync> (N min ago)", the last error, and notes; then how many diary lines and the latest one. If the store doesn't exist yet, it says to run sync.
+- **`ago(then, now)`**: "5 min ago", "3 h ago", "3 days ago".
+
+**How a command reaches the code** (the same idea as `ntulearn-mcp` in Phase 1):
+
+```
+pyproject.toml   [project.scripts]  uni-copilot = "uni_copilot.cli:main"
+   │  uv sync writes a small launcher: .venv/Scripts/uni-copilot.exe
+   ▼
+uv run uni-copilot sync
+   │  the launcher imports uni_copilot.cli and calls main()
+   ▼
+main() ── argparse: "sync" ──► cmd_sync(db)
+                                  ├─ store.db.open_db(db)
+                                  └─ store.sync.run_sync(conn, now=started) ──► steps 2–5
+```
+
+**The launcher needs `uv sync` once.** Changing `[project.scripts]` only takes effect when uv rewrites the launchers. Here `uv sync` failed with "ntulearn-mcp.exe ... used by another process", because this Claude Code session is running `ntulearn-mcp` (Windows won't replace a running .exe). Until it's re-synced, `uni-copilot.exe` still points to the old placeholder, so use `uv run python -m uni_copilot.cli ...`. That runs the same `main()` without the launcher.
+
+**`uni-copilot events`** (planned here as "a quick look at the store") moved to step 7, together with a `changes` command. Both need the read-side queries that step 7 builds, so they don't get written twice.
+
+Test (PowerShell). First make the launcher, with no Claude Code window open (or use the `python -m` form below instead):
+
+```
+uv sync
+uv run uni-copilot status
+uv run uni-copilot sync
+uv run uni-copilot sync
+uv run uni-copilot status
+uv run pytest
+```
+
+Without `uv sync`: replace `uv run uni-copilot` with `uv run --no-sync python -m uni_copilot.cli`.
+
+Expect (my run on 25 Oct, into a scratch database):
+
+```
+Syncing NTULearn (GET only, about 1 minute)...
+  deadlines        27 s   34 seen   new 34
+  announcements    16 s   31 seen   new 31
+  messages         20 s   15 seen   new 15
+Done. As of Sun 25 Oct 11:40 SGT. 80 change(s).
+
+Syncing NTULearn (GET only, about 1 minute)...
+  deadlines        27 s   34 seen   no changes
+  announcements    16 s   31 seen   no changes
+  messages         20 s   15 seen   no changes
+Done. As of Sun 25 Oct 11:41 SGT. 0 change(s).
+```
+
+- **The second sync reports 0 changes: the Phase 2 "done" test, now with the real command.**
+- `status` before the first sync: three sources "never synced", 0 lines. After: 34 / 31 / 15 active, "as of ... (N min ago)", 80 diary lines.
+- `$LASTEXITCODE` after a sync: 0.
+- `pytest`: 78 passed, 4 skipped.
+
+After your first sync, the real store holds your data. Later syncs only add diary lines for real changes. Things to try over the next days: submit something, then sync (→ `status_changed`); wait for a new announcement (→ `new`).
+
+Commit:
+
+```
+git add pyproject.toml src/uni_copilot/__init__.py src/uni_copilot/cli.py "docs/phase 2"
+git commit -m "feat(cli): add uni-copilot sync and status commands"
+```
+
 ## Open items
 
 Not verified yet. Each is checked in the step named in `phase-2-core.md` ("Things to check during Phase 2").
@@ -460,5 +539,10 @@ Not verified yet. Each is checked in the step named in `phase-2-core.md` ("Thing
 - **Separator:** a character put between parts before hashing so different splits can't give the same text.
 - **Write lock / `BEGIN IMMEDIATE`:** only one program may write to a SQLite file at a time. `BEGIN IMMEDIATE` takes that lock at the start of a transaction instead of at the first write.
 - **Closure:** a function made inside another function that remembers its variables. `make_covers` returns `covers`, which remembers `source`, the window and the failed courses.
+- **CLI (command-line interface):** a program you run by typing a command (`uni-copilot sync`).
+- **argparse subcommands:** `uni-copilot sync` and `uni-copilot status` are two subcommands of one program, like `git add` and `git commit`.
+- **Exit code:** a number a program returns when it ends: 0 = OK, anything else = a problem. PowerShell shows the last one in `$LASTEXITCODE`.
+- **Entry point / launcher (`[project.scripts]`):** a line in `pyproject.toml` that makes uv create a small `.exe` in `.venv/Scripts` that calls a Python function.
+- **`python -m package.module`:** runs a module as a program, without needing a launcher.
 - **Callable / passing a function:** `covers` is a function handed to `save_events`, so the caller decides the rule and `events.py` just applies it.
 - **Bookkeeping fields:** fields our own code fills (`first_seen_at`, ...), as opposed to fields that come from the source (`title`, `due_at`).

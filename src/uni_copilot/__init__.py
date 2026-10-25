@@ -1,2 +1,1 @@
-def main() -> None:
-    print("Hello from uni-copilot!")
+"""uni-copilot: personal academic agent for NTU (NTULearn tools, local event store, CLI)."""
