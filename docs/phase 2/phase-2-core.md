@@ -1,6 +1,6 @@
 # Phase 2: event store
 
-Status (25 Oct 2026): steps 0–9 done, decisions made (below). Next: step 10. Full details of every step: `phase-2-build-log.md` in this folder.
+Status (25 Oct 2026): steps 0–10 done, decisions made (below). Next: step 11. Full details of every step: `phase-2-build-log.md` in this folder.
 
 ## What Phase 2 builds
 
@@ -81,7 +81,7 @@ One file per step. You test each step before the next, like Phase 1.
 7. `src/uni_copilot/store/queries.py`: the read side: upcoming events by days/kind/course, changes since a time, the "last seen" bookmark per channel, and the "as of" time (last successful sync per source). Plus two CLI commands that use it: `uni-copilot events` (what's coming up) and `uni-copilot changes` (the diary, with titles). The first sync's "new" lines (everything found the first time) aren't news: `whats_new` leaves them out. Offline self-test. **Done.**
 8. `src/uni_copilot/pilot_mcp/server.py`: the second MCP server with `list_events` (titles + preview, compact), `whats_new` (changed items with their full bodies), `get_event` (one item in full), `sync_status` (last sync time, failed sources) and `mark_seen`. Every result carries `as_of` (UTC + SGT), and the instructions tell Claude to state it in every answer. Output models with SGT times and UNTRUSTED labels, like Phase 1 (in `pilot_mcp/models.py`). `mark_seen(channel, up_to=checked_at)` so a sync in between isn't skipped. Test: self-test and the MCP Inspector. **Done.**
 9. `pyproject.toml`, `.mcp.json`, `.claude/settings.json`: add the `pilot-mcp` command, register the `pilot` server with Claude Code, and pre-allow its tools (the read-only ones plus `mark_seen`, which only moves a local bookmark). **Done.**
-10. `.claude/skills/weekly-actions/SKILL.md`: the `weekly_actions` workflow: deadlines not yet submitted + announcements (~3 weeks) + messages + a logistics check for tests this week ("matric", "calculator", "venue", "bring") → a checklist with sources and the "as of" time; inferred items marked as inferred.
+10. `.claude/skills/weekly-actions/SKILL.md`: the `weekly_actions` workflow: deadlines not yet submitted + announcements (~3 weeks) + messages + a logistics check for tests this week ("matric", "calculator", "venue", "bring") → a checklist with sources and the "as of" time; inferred items marked as inferred. Plus routing: pilot is the default for study questions (server instructions + `CLAUDE.md`), so nobody has to type "using pilot", on Telegram either. **Done** (live check pending: does Claude pick the skill by itself?).
 11. `tests/`: store tests (dedupe, edits, moved deadlines, status changes, removed items, failed source doesn't remove, window exit isn't removal, two identical syncs → 0 changes, `whats_new` after a bookmark), adapter tests, pilot tool tests. All synthetic.
 12. Optional: Windows Task Scheduler runs `uni-copilot sync` every 2 hours (07:00–23:00), so the store stays fresh without you. Checks that silent sign-in works from a scheduled task.
 13. Final check: two syncs in a row → only real changes; then ask Claude Code "what's due this week?" and "what's new?" and check the answers come from `pilot` instantly, say "as of", and match NTULearn.

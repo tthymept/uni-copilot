@@ -23,6 +23,13 @@ The full plan, architecture, roadmap and verified API facts are in `docs/uni-cop
 - If `uv run` fails with "ntulearn-mcp.exe ... used by another process", a Claude Code session is running the server; close it once or use `uv run --no-sync ...`.
 - Login spike: `uv run python spike_session_check.py [--watch 240]`
 
+## Answering study questions (terminal and Telegram)
+
+- **Default: the `pilot` tools** (local store, instant) for "what's due?", "what's new?", "anything from <course>?". The user never has to say "using pilot".
+- **Every answer from the store says "as of <time> SGT"** (and how old). Don't re-fetch live just because the data is old (user's decision, 25 Oct).
+- **Live `ntulearn` tools only** when the user asks for a live / "right now" check, needs something the store doesn't have (posts older than 30 days, course content, a course named by words), or pilot reports a failed or missing sync. Say that you checked live.
+- "What do I need to do this week?" → the `weekly-actions` skill (`.claude/skills/weekly-actions/`).
+
 ## Architecture rules
 
 - Two MCP servers: `ntulearn_mcp` (live, read-only NTULearn + NTULearnVideo) and `pilot_mcp` (local event store, manual events, notifications). Keep them separate.

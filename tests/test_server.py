@@ -96,10 +96,12 @@ def test_login_status_signed_out(monkeypatch):
     assert "login" in result.structured_content["detail"]
 
 
-# .claude/settings.json allows exactly the read-only tools that exist, and never `login`.
+# .claude/settings.json allows exactly the read-only ntulearn tools that exist, and never `login`.
+# (Rules for other servers, like mcp__pilot__..., are checked by their own tests.)
 def test_permission_rules_match_tools():
     settings = json.loads((PROJECT_ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
-    allowed = {rule.removeprefix("mcp__ntulearn__") for rule in settings["permissions"]["allow"]}
+    prefix = "mcp__ntulearn__"
+    allowed = {rule.removeprefix(prefix) for rule in settings["permissions"]["allow"] if rule.startswith(prefix)}
     assert allowed == TOOL_NAMES - {"login"}
     mcp_json = json.loads((PROJECT_ROOT / ".mcp.json").read_text(encoding="utf-8"))
     assert mcp_json["mcpServers"]["ntulearn"]["args"] == ["run", "ntulearn-mcp"]

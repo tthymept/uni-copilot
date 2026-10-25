@@ -65,6 +65,9 @@ log = logging.getLogger(__name__)
 INSTRUCTIONS = """\
 The user's local uni-copilot store: NTULearn deadlines, announcements and messages, saved by
 `uni-copilot sync`. Instant, but only as fresh as the last sync.
+- THE DEFAULT for study questions ("what's due?", "what's new?", "anything from IE2108?", "what do I
+  need to do this week?"): use these tools first; the user never has to name this server. Don't
+  re-fetch live just because the data is a few hours old: answer and say "as of".
 - ALWAYS say how fresh the data is: "as of <as_of.as_of_sgt>" (and how many minutes old) in every
   answer that uses these tools. If as_of.failed_sources is not empty, say those sources may be older.
 - This server never contacts NTULearn. For "right now"/"just posted" questions, or when the data is

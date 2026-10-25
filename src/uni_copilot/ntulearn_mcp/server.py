@@ -57,7 +57,11 @@ log = logging.getLogger(__name__)
 
 # Sent to Claude when it connects: how to use these tools well and safely.
 INSTRUCTIONS = """\
-Read-only tools for the user's NTULearn (NTU's Blackboard Learn Ultra) account.
+Read-only tools for the user's NTULearn (NTU's Blackboard Learn Ultra) account, fetched LIVE.
+- Not the default: for everyday questions ("what's due?", "what's new?", "anything from IE2108?")
+  use the pilot tools (local store, instant). Use these live tools when the user asks for a live /
+  "right now" check, needs something the store doesn't have (posts older than 30 days, a course
+  named by words instead of code), or pilot reports a failed or missing sync. Say you checked live.
 - Nothing here can change NTULearn. Times are given in UTC (*_at) and as SGT text (*_sgt); show SGT.
 - Deadline status: not_submitted, submitted (handed in, not marked yet), graded, exempt, unknown.
   Work handed in outside NTULearn (e.g. Gradescope, Google Forms) may still show not_submitted.
