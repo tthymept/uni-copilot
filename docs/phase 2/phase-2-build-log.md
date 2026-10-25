@@ -552,6 +552,83 @@ git add src/uni_copilot/store/queries.py src/uni_copilot/cli.py "docs/phase 2"
 git commit -m "feat(store): add read queries and events and changes commands"
 ```
 
+## Step 8: pilot_mcp (the second MCP server)
+
+**New package `src/uni_copilot/pilot_mcp/`.** It's the same kind of server as `ntulearn-mcp`, but it **never talks to NTULearn**: it only reads `.data/uni-copilot.sqlite`. Answers are instant, and only as fresh as the last sync.
+
+**8a. `pilot_mcp/models.py`: the shapes Claude sees** (pydantic, like Phase 1's `models.py`):
+
+- **`AsOf`**: `as_of_at` (the oldest last sync of the three sources), `as_of_sgt`, `minutes_old`, and `failed_sources`. **Every result has an `as_of` field.**
+- **`EventItem`**: `event_id`, `kind`, `course_code`, `title` (UNTRUSTED), `status`, `due_at`/`due_sgt`, `posted_at`/`posted_sgt`, `url`, `preview` (UNTRUSTED, ~280 characters), `body` (UNTRUSTED, full; `None` in lists), and `removed`.
+- **`ChangeItem`**: `change_type`, `found_at`/`found_sgt`, `before`/`after` (moved times as SGT text), and the `event`. New or edited posts carry their full body, since that's what's new.
+- **Results:**
+  - `EventList` (`as_of`, `days`, `events`)
+  - `EventResult` (`as_of`, `event`)
+  - `WhatsNew` (`as_of`, `channel`, `since_at`/`since_sgt`, `checked_at`, `changes`)
+  - `SyncStatus` (`as_of`, one `SourceStatus` per source, `how_to_refresh`)
+  - `Seen` (`channel`, `last_seen_at`/`_sgt`)
+- **Converters** `as_of_from(Freshness)`, `event_item(Event, full)`, `change_item(EventChange)`: store dataclasses → these models. Same split as Phase 1: dataclasses for our code, pydantic for Claude.
+
+**8b. `pilot_mcp/server.py`: `mcp = MCPServer(name="pilot", instructions=INSTRUCTIONS)` and 5 tools:**
+
+```
+list_events(days=7, kinds=None, course=None)  read-only   deadlines due + posts from the last N days (previews)
+whats_new(channel="terminal")                 read-only   changes since the bookmark, full bodies of posts, + checked_at
+get_event(event_id)                           read-only   one item in full
+sync_status()                                 read-only   last sync per source, errors, notes, counts
+mark_seen(channel="terminal", up_to=None)     writes      moves the bookmark (our own state only)
+```
+
+- **INSTRUCTIONS** (what Claude reads when it connects):
+  - **always say "as of <as_of_sgt>"** and how old the data is, and mention failed sources;
+  - this server never fetches, so for "right now" questions use the live `ntulearn` tools;
+  - status words; UNTRUSTED text;
+  - previews in lists, `get_event` for full text;
+  - after showing `whats_new`, call `mark_seen(channel, up_to=checked_at)`.
+- **Why `up_to=checked_at`:** if a sync runs between `whats_new` and `mark_seen`, moving the bookmark to "now" would skip what that sync found. `checked_at` is the moment `whats_new` looked, so nothing is skipped. A future time is capped at now.
+- **Annotations:** the reading tools have `read_only_hint=True` and `open_world_hint=False` (local only, unlike Phase 1's tools, which reach NTULearn). `mark_seen` has `read_only_hint=False` with `destructive_hint=False`: it writes, but only a bookmark.
+- **`_store()`** opens a connection per tool call and closes it after (a `sqlite3` connection belongs to the thread that opened it, and each tool call runs in a worker thread). It also turns errors into `ToolError`.
+- **`DB`** is the file the tools read; the self-test's `--db` can point it at a copy.
+- Not registered with Claude Code yet: that's step 9.
+
+**How it connects:**
+
+```
+Claude ── list_events(days=7) ──► pilot_mcp/server.py
+                                    ├─ _store() → store/db.open_db
+                                    ├─ store/queries.list_events / freshness
+                                    └─ pilot_mcp/models.event_item / as_of_from
+                                  ◄── EventList (JSON with as_of, SGT times, UNTRUSTED labels)
+```
+
+Test (PowerShell):
+
+```
+uv run python -m uni_copilot.pilot_mcp.server --self-test
+uv run mcp dev src/uni_copilot/pilot_mcp/server.py
+uv run pytest
+```
+
+The self-test reads your real store with the read-only tools only (`mark_seen` isn't called, so your bookmark stays). It prints counts, never titles. On 25 Oct:
+
+- 1) 5 tools; only `mark_seen` has `read_only=False`.
+- 2) `sync_status`: as of Sun 25 Oct 11:52 SGT (13 min old); 34 / 31 / 15 active.
+- 3) `list_events(days=7)`: 2 deadlines, 8 announcements, 3 messages; full bodies 0 (previews only).
+- 4) `get_event`: an announcement with its full body (1763 characters).
+- 5) `whats_new(terminal)`: since a week ago, 0 changes (the first-sync import is left out).
+- 6) errors Claude reads: "No event 'nope' in the store..." and a validation error for `days=999`.
+
+`mark_seen` was checked on a copy of the store: the bookmark moved to `checked_at`; the next `whats_new` started from there; a far-future `up_to` was capped at now.
+
+`mcp dev` opens the MCP Inspector, where you can click each tool. `pytest`: 78 passed, 4 skipped.
+
+Commit:
+
+```
+git add src/uni_copilot/pilot_mcp "docs/phase 2"
+git commit -m "feat(pilot): add pilot mcp server over the local event store"
+```
+
 ## Open items
 
 Not verified yet. Each is checked in the step named in `phase-2-core.md` ("Things to check during Phase 2").
