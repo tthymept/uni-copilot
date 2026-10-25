@@ -495,6 +495,63 @@ git add pyproject.toml src/uni_copilot/__init__.py src/uni_copilot/cli.py "docs/
 git commit -m "feat(cli): add uni-copilot sync and status commands"
 ```
 
+## Step 7: store/queries.py (the read side) + `events` and `changes` commands
+
+**7a. New `src/uni_copilot/store/queries.py`.** Everything `pilot-mcp` (step 8) and the CLI ask the store. It only reads the local file, so it's instant.
+
+- **`list_events(conn, days=7, kinds=None, course=None)`**: deadlines due from now to now + `days` (soonest first), and announcements/messages posted in the last `days` (newest first). Removed events are left out. `course` matches part of the code in any case (`"da3"` → DA3000), using SQL `LIKE`. Course *names* aren't in the store, so "data structures" won't match here; the live `ntulearn-mcp` tools still can.
+- **`get_event(conn, event_id)`**: one event with its full body (for `get_event` in step 8).
+- **`changes_since(conn, since)`**: diary lines after a time, each paired with its event (`EventChange`: `change` + `event`). In SQL this is a **JOIN**: each `event_changes` row is put next to the `events` row with the same `event_id`, so the line comes with its title and course.
+- **`whats_new(conn, channel)`**: `changes_since(bookmark)` for one channel (`"terminal"` or `"telegram"`). It only reads; the bookmark doesn't move. A channel that has never looked sees the last 7 days.
+- **`last_seen(conn, channel)` / `mark_seen(conn, channel)`**: read / move the bookmark (`last_seen:<channel>` in `state`). `mark_seen` is the only write in this file.
+- **`freshness(conn)` → `Freshness`**: `last_sync` per source, `errors` for sources whose last try failed, and **`as_of`**, the *oldest* of the sources' last syncs. The store is never claimed to be fresher than its stalest part.
+
+**The first-sync import isn't news.** The very first sync wrote a "new" line for all 80 things it found. That means "we started watching", not "80 new posts". `first_sync_times(conn)` finds each source's first diary time, and `is_first_sync(item, first)` marks those lines. `whats_new` leaves them out, and `uni-copilot changes` shows them as one summary line per source. The diary itself keeps them. No new state key was needed, because the diary already records when each source was first seen.
+
+**7b. `cli.py`: two new commands, plus `as_of_line` and `describe_change`:**
+
+- `uni-copilot events [--days 7] [--kind deadline|announcement|message] [--course DA3]`: the "as of" line, then deadlines (due time in SGT, course, status, title) and posts (posted time, course, kind, title).
+- `uni-copilot changes [--days 7]`: the "as of" line, then each diary line: time, type, course, title, and before → after. Moved times are shown in SGT. The first-sync import is one line per source.
+- These read the store only, no NTULearn. Titles are printed because it's your own terminal; bodies never are.
+
+**How it connects:**
+
+```
+uni-copilot events ──► queries.list_events ─────────────┐
+uni-copilot changes ─► queries.changes_since ───────────┤
+pilot-mcp (step 8) ──► list_events / whats_new /        ├──► db.row_to_event ──► .data/uni-copilot.sqlite
+                       get_event / freshness / mark_seen ┘
+```
+
+Test (PowerShell):
+
+```
+uv run python -m uni_copilot.store.queries
+uv run uni-copilot events
+uv run uni-copilot events --kind deadline --days 30
+uv run uni-copilot events --course da3
+uv run uni-copilot changes
+uv run pytest
+```
+
+Expect:
+
+- **The self-test** (made up, in memory) plays a first sync at 10:00 and a second at 12:00 that finds a new post and a submission:
+  - 1) `list_events` at 12:00: the submitted deadline, then the two posts newest first; `course='da3'` → 1, `days=30` → 4.
+  - 2) `whats_new('terminal')`, bookmark 10:00, "as of" 12:00: `status_changed ... open -> submitted` and `new Made-up news 8`. Telegram (never looked): 2 changes, with the 3 first-sync lines left out.
+  - 3) after `mark_seen`: 0 changes.
+  - 4) `get_event` gives the full body.
+- **`events`** on your store (25 Oct): "As of Sun 25 Oct 11:52 SGT", 2 deadlines in the next 7 days, 11 posts from the last 7 days.
+- **`changes`**: three "first sync: started watching 34 deadlines / 31 announcements / 15 messages" lines, nothing else yet. Real changes appear after later syncs.
+- `pytest`: 78 passed, 4 skipped.
+
+Commit:
+
+```
+git add src/uni_copilot/store/queries.py src/uni_copilot/cli.py "docs/phase 2"
+git commit -m "feat(store): add read queries and events and changes commands"
+```
+
 ## Open items
 
 Not verified yet. Each is checked in the step named in `phase-2-core.md` ("Things to check during Phase 2").
@@ -539,6 +596,9 @@ Not verified yet. Each is checked in the step named in `phase-2-core.md` ("Thing
 - **Separator:** a character put between parts before hashing so different splits can't give the same text.
 - **Write lock / `BEGIN IMMEDIATE`:** only one program may write to a SQLite file at a time. `BEGIN IMMEDIATE` takes that lock at the start of a transaction instead of at the first write.
 - **Closure:** a function made inside another function that remembers its variables. `make_covers` returns `covers`, which remembers `source`, the window and the failed courses.
+- **JOIN:** SQL that puts rows of two tables side by side where a column matches (`event_changes.event_id = events.event_id`).
+- **`LIKE '%da3%'`:** SQL text matching; `%` means "anything here". Case-insensitive for English letters in SQLite.
+- **`GROUP BY` + `MIN(...)`:** one result per group (per source), here the earliest diary time.
 - **CLI (command-line interface):** a program you run by typing a command (`uni-copilot sync`).
 - **argparse subcommands:** `uni-copilot sync` and `uni-copilot status` are two subcommands of one program, like `git add` and `git commit`.
 - **Exit code:** a number a program returns when it ends: 0 = OK, anything else = a problem. PowerShell shows the last one in `$LASTEXITCODE`.

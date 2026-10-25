@@ -6,9 +6,11 @@ In plain words:
                        print what changed per source
   uni-copilot status   how fresh the store is: last sync per source ("as of"),
                        errors, and how many events and diary lines it holds
+  uni-copilot events   deadlines due in the next N days and posts from the
+                       last N days, from the store (instant, no NTULearn)
+  uni-copilot changes  the diary of the last N days, with titles
 
-  Later steps add: `events` and `changes` (step 7), and Phase 3 adds
-  `remind` and `notify`.
+  Phase 3 adds `remind` and `notify`.
 
 How a command reaches the code (same idea as the MCP tools in Phase 1):
   pyproject.toml  [project.scripts] uni-copilot = "uni_copilot.cli:main"
@@ -23,11 +25,13 @@ Exit code (what Task Scheduler sees in step 12): 0 = every source worked,
 import argparse
 import logging
 import sys
-from datetime import datetime, timezone
+import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from uni_copilot.ntulearn_mcp.models import sgt_text
 from uni_copilot.store.db import DB_PATH, get_state, open_db, schema_version, time_from_db
+from uni_copilot.store.queries import EventChange, changes_since, first_sync_times, freshness, is_first_sync, list_events
 from uni_copilot.store.sync import run_sync
 
 # Friendly names for the sources, in the order they're shown.
@@ -45,10 +49,21 @@ def main(argv: list[str] | None = None) -> int:
     commands = parser.add_subparsers(dest="command", required=True, metavar="command")
     commands.add_parser("sync", help="fetch NTULearn into the local store (GET only, about 1 minute)")
     commands.add_parser("status", help="how fresh the store is, and what it holds")
+    events = commands.add_parser("events", help="deadlines coming up and recent posts, from the store")
+    events.add_argument("--days", type=int, default=7, help="deadlines due in the next N days, posts from the last N days (default 7)")
+    events.add_argument("--kind", choices=["deadline", "announcement", "message"], action="append",
+                        help="only this kind (repeat for several)")
+    events.add_argument("--course", help="part of a course code, e.g. DA3")
+    changes = commands.add_parser("changes", help="the diary of changes, with titles")
+    changes.add_argument("--days", type=int, default=7, help="changes found in the last N days (default 7)")
     args = parser.parse_args(argv)
 
     # Phase 1 clients log every step at INFO; for a command line only warnings matter.
     logging.basicConfig(level=logging.WARNING, format="  [%(name)s] %(message)s")
+    if args.command == "events":
+        return cmd_events(args.db, args.days, args.kind, args.course)
+    if args.command == "changes":
+        return cmd_changes(args.db, args.days)
     run = {"sync": cmd_sync, "status": cmd_status}[args.command]
     return run(args.db)
 
@@ -108,6 +123,83 @@ def cmd_status(db: Path) -> int:
     print(f"  diary          {lines} line(s){latest_text}")
     conn.close()
     return 0
+
+
+# `uni-copilot events`: deadlines due soon and recent posts, straight from the store.
+def cmd_events(db: Path, days: int, kinds: list[str] | None, course: str | None) -> int:
+    if not db.exists():
+        print(f"No store yet ({db}). Run: uv run uni-copilot sync")
+        return 1
+    conn = open_db(db)
+    now = datetime.now(timezone.utc)
+    print(as_of_line(conn, now))
+    items = list_events(conn, days=days, kinds=kinds, course=course, now=now)
+    conn.close()
+
+    deadlines = [e for e in items if e.kind == "deadline"]
+    posts = [e for e in items if e.kind != "deadline"]
+    if not kinds or "deadline" in kinds:
+        print(f"Deadlines due in the next {days} day(s): {len(deadlines)}")
+        for e in deadlines:
+            print(f"  {sgt_text(e.due_at)}  {e.course_code:<7} {e.status:<9}  {e.title}")
+    if not kinds or set(kinds) - {"deadline"}:
+        print(f"Posts from the last {days} day(s): {len(posts)}")
+        for e in posts:
+            print(f"  {sgt_text(e.posted_at)}  {e.course_code:<7} {e.kind:<12}  {e.title}")
+    return 0
+
+
+# `uni-copilot changes`: the diary of the last N days. The first-sync import
+# (everything found the first time) is shown as one summary line per source.
+def cmd_changes(db: Path, days: int) -> int:
+    if not db.exists():
+        print(f"No store yet ({db}). Run: uv run uni-copilot sync")
+        return 1
+    conn = open_db(db)
+    now = datetime.now(timezone.utc)
+    print(as_of_line(conn, now))
+    items = changes_since(conn, now - timedelta(days=days))
+    first = first_sync_times(conn)
+    conn.close()
+
+    print(f"Changes found in the last {days} day(s):")
+    shown_first: set[str] = set()
+    for item in items:
+        source = item.event.source
+        if is_first_sync(item, first):
+            if source not in shown_first:
+                count = sum(1 for i in items if i.event.source == source and is_first_sync(i, first))
+                label = SOURCE_LABELS.get(source, source)
+                print(f"  {sgt_text(item.change.changed_at)}  first sync: started watching {count} {label}")
+                shown_first.add(source)
+            continue
+        print(f"  {sgt_text(item.change.changed_at)}  {describe_change(item)}")
+    if not items:
+        print("  none")
+    return 0
+
+
+# One diary line as text, e.g. "moved  DA3000  DA3 Report: Fri 07 Nov 23:59 SGT -> Sun 09 Nov 23:59 SGT".
+def describe_change(item: EventChange) -> str:
+    c, e = item.change, item.event
+    text = f"{c.change_type:<15} {e.course_code or '':<7} {e.title}"
+    if c.change_type == "moved":
+        before, after = time_from_db(c.before), time_from_db(c.after)
+        text += f": {sgt_text(before) if before else 'no date'} -> {sgt_text(after) if after else 'no date'}"
+    elif c.before or c.after:
+        text += f": {c.before} -> {c.after}"
+    return text
+
+
+# "As of Sun 25 Oct 11:52 SGT (5 min ago)", plus a warning for any failed source.
+def as_of_line(conn: sqlite3.Connection, now: datetime) -> str:
+    f = freshness(conn)
+    if f.as_of is None:
+        return "As of: never fully synced. Run: uv run uni-copilot sync"
+    line = f"As of {sgt_text(f.as_of)} ({ago(f.as_of, now)})"
+    if f.errors:
+        line += f"; last try failed for: {', '.join(SOURCE_LABELS.get(s, s) for s in f.errors)}"
+    return line
 
 
 # "12 min ago", "3 h ago", "2 days ago": how long since `then`.
