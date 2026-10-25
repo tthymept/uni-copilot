@@ -1,6 +1,6 @@
 # Phase 2: event store
 
-Status (25 Oct 2026): steps 0–2 done, decisions made (below). Next: step 3. Full details of every step: `phase-2-build-log.md` in this folder.
+Status (25 Oct 2026): steps 0–3 done, decisions made (below). Next: step 4. Full details of every step: `phase-2-build-log.md` in this folder.
 
 ## What Phase 2 builds
 
@@ -48,7 +48,7 @@ One file per step. You test each step before the next, like Phase 1.
 0. Housekeeping: decisions recorded in the plan doc and here, `phase-2-build-log.md` created, `.data/` confirmed git-ignored, SQLite version checked. **Done.**
 1. `src/uni_copilot/store/models.py`: the **event** shape (`event_id`, `source`, `kind`, `course_code`, `course_site_id`, `title`, `body`, `url`, `starts_at`, `due_at`, `posted_at`, `status`, `content_hash`, `found_in`, `first_seen_at`, `last_seen_at`, `modified_at`, `removed_at`) and the **change** shape (`event_id`, `change_type`, `changed_at`, what was before and after). Frozen dataclasses that reject non-UTC times and wrong ids. Offline self-test. **Done.**
 2. `src/uni_copilot/store/db.py`: opens the SQLite file, creates the tables (`events`, `event_changes`, `state`) and indexes, and upgrades the schema with a version number (`PRAGMA user_version`) so later phases can add tables safely. Also converts Events/Changes to rows and back, and reads/writes `state`. Test: create the database and list its tables. **Done.**
-3. `src/uni_copilot/store/events.py`: **the heart of Phase 2.** `upsert` (insert a new event or update an existing one, matched by `event_id`) and **change detection**: compare the new version with the stored one and record `new`, `edited`, `moved` (due time changed), `status_changed` or `removed`. All changes from one sync are saved in one **transaction** (all or nothing). Offline tests with made-up events.
+3. `src/uni_copilot/store/events.py`: **the heart of Phase 2.** `upsert` (insert a new event or update an existing one, matched by `event_id`) and **change detection**: compare the new version with the stored one and record `new`, `edited`, `moved` (due time changed), `status_changed` or `removed`. All changes from one sync are saved in one **transaction** (all or nothing). Removal only for what the caller says the sync covered (`covers`). Offline self-test with five made-up syncs. **Done.**
 4. `src/uni_copilot/sources/ntulearn.py`: **adapters** that turn Phase 1 results into events: `Deadline` → `ntulearn_gradebook:<column id>`, `Announcement` → `ntulearn_announcement:<id>`, `Message` → `ntulearn_message:<id>`. Also the `content_hash` (a fingerprint of the fields that matter, so a real edit changes it but re-fetching the same thing doesn't). Offline self-test.
 5. `src/uni_copilot/store/sync.py`: runs each source, saves the events, and records per-source sync state. Two safety rules: a source that **failed** (or a course in its `notes`) never marks its events as removed, and an item that only **left the time window** is not "removed". Live self-test (GET only, counts only).
 6. `src/uni_copilot/cli.py`: the `uni-copilot` command: `uni-copilot sync` (prints counts per source and per change type) and `uni-copilot events` (a quick look at the store, codes and dates only). Replaces the placeholder `uni_copilot:main`. Test: run sync twice.

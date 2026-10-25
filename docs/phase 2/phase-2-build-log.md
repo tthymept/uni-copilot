@@ -199,6 +199,80 @@ git add src/uni_copilot/store/db.py "docs/phase 2"
 git commit -m "feat(store): add sqlite database with versioned schema"
 ```
 
+## Step 3: store/events.py (the heart of Phase 2)
+
+**`src/uni_copilot/store/events.py`: saving events and writing the diary.** Every sync hands it a list of events ("what NTULearn shows now"). It compares each with the stored copy, writes the differences to `event_changes`, and saves the new copy.
+
+**The main function: `save_events(conn, fetched, now, covers=None) -> SaveResult`**
+
+1. Checks no `event_id` appears twice in `fetched` (that would be an adapter bug).
+2. Opens **one transaction** (`with conn:`): `COMMIT` at the end, `ROLLBACK` if anything raises.
+3. `load_events(conn)`: reads every stored event into a dict by `event_id` (hundreds of rows, so reading all is simplest).
+4. For each fetched event:
+   - `diff(old, new, now)` → the diary lines (below).
+   - `merge_bookkeeping(old, new, now, changed)` → the copy to store: the new source fields, `first_seen_at` kept from the old copy, `last_seen_at = now`, `modified_at = now` only if something changed, `removed_at = None`.
+   - **Upsert** it (`INSERT ... ON CONFLICT (event_id) DO UPDATE SET ...`: insert, or overwrite every column if the id exists) and insert the diary lines.
+5. **Removals**, only if `covers` was given: every stored event that's still active, missing from `fetched`, and `covers(event)` says "this sync should have included it" → `removed_at = now` and a `removed` diary line.
+6. Returns `SaveResult`: the `changes` written, how many were `seen`, `counts()` (e.g. `{"new": 3}`) and `unchanged`.
+
+**`diff(old, new, now)`, the comparison** (a **pure function**: no database, easy to test):
+
+```
+old is None                     -> new
+old was removed, now it's back  -> new (before = "removed")
+due_at or starts_at different   -> moved           before/after = the two times
+status different                -> status_changed  before/after = the two words
+content_hash different          -> edited          before/after = the titles, only if the title changed
+nothing different               -> []  (no diary line)
+```
+
+One event can get several lines in one sync (e.g. moved *and* edited). Fields like `url` or `found_in` are saved but don't count as a change.
+
+**Why `covers` is a function passed in.** `events.py` can't know whether a missing item was really deleted, or whether its course's fetch failed, or whether it just left the time window. `sync.py` (step 5) knows, so it passes a small function that answers "should this sync have included this stored event?". With no `covers`, nothing is ever removed: the safe default. Passing a function like this is the same **dependency injection** idea as `signer=sign_in` in Phase 1.
+
+**Why two identical syncs write nothing (the "done" test).** Every check in `diff` is "different or not". Same data in → no differences → no diary rows. Only `last_seen_at` moves.
+
+**How it connects:**
+
+```
+sync.py (step 5)
+  │  adapters (step 4) turn Phase 1 results into Events
+  ▼
+save_events(conn, events, now, covers)
+  ├─ load_events ── db.row_to_event ──────── reads `events`
+  ├─ diff ───────── models.Change ────────── what changed (pure)
+  ├─ merge_bookkeeping ── dataclasses.replace
+  └─ conn.execute(_UPSERT_EVENT / _INSERT_CHANGE) ── db.event_to_row / change_to_row
+  ▼
+SaveResult (changes, counts) → printed by `uni-copilot sync` (step 6)
+```
+
+Test (PowerShell):
+
+```
+uv run python -m uni_copilot.store.events
+uv run pytest
+```
+
+The self-test plays five made-up syncs in memory (nothing saved). Expect:
+
+- 1) `new: 3`.
+- 2) the same data 2 h later: `unchanged 3, changes none`. This is the done test in miniature.
+- 3) `moved: 1, status_changed: 1, edited: 1`.
+- 4) the announcement is gone and announcements are covered: `removed: 1`.
+- 5) the deadlines are missing but nothing is covered (a failed fetch): `changes none`.
+- 6) a crash half-way: "diary rows before 7, after 7; Assignment 3 stored: False". The transaction undid everything from that sync.
+- 7) the diary: 7 rows, `#4 moved ... 2026-11-07T15:59 -> 2026-11-09T15:59`, `#5 status_changed open -> submitted`.
+- 8) Assignment 1: first seen 04:00, last seen 08:00, modified 08:00 UTC.
+- `pytest`: 78 passed, 4 skipped.
+
+Commit:
+
+```
+git add src/uni_copilot/store/events.py "docs/phase 2"
+git commit -m "feat(store): save events and record changes"
+```
+
 ## Open items
 
 Not verified yet. Each is checked in the step named in `phase-2-core.md` ("Things to check during Phase 2").
@@ -208,6 +282,7 @@ Not verified yet. Each is checked in the step named in `phase-2-core.md` ("Thing
 - Sessions 2 hours apart, and headless sign-in from Task Scheduler (step 12).
 - Whether Claude Code picks the `weekly-actions` skill for a plain question (step 10).
 - Whether Claude states "as of" in every answer (step 13).
+- **A deadline moved far outside the sync window** (e.g. to +5 months) disappears from the fetch while its *stored* due date is still inside the window, so step 5 would mark it removed rather than moved. Rare; when it comes back into the window it reappears as `new` (before = "removed"). Revisit if it ever happens.
 - **Later (noted 25 Oct):** a live `get_announcement(id)` tool in `ntulearn-mcp` (maybe `get_message` too): fetch one post by id instead of a whole course's list. Recorded in the plan, section 4.1 "News". Not needed in Phase 2, because `get_event` serves full bodies from the store.
 
 ## Concepts
@@ -233,4 +308,7 @@ Not verified yet. Each is checked in the step named in `phase-2-core.md` ("Thing
 - **WAL (write-ahead log):** a SQLite mode where readers and a writer don't block each other.
 - **Placeholder (`?`, `:name`) and SQL injection:** values are sent separately from the SQL text, so text from other people can never be run as SQL.
 - **Upsert in SQL:** `INSERT ... ON CONFLICT (key) DO UPDATE`.
+- **`with conn:`:** Python's `sqlite3` turns the block into one transaction: commit if it finishes, roll back if it raises.
+- **Idempotent:** doing it twice has the same effect as once. Two identical syncs → the second writes no diary lines.
+- **Callable / passing a function:** `covers` is a function handed to `save_events`, so the caller decides the rule and `events.py` just applies it.
 - **Bookkeeping fields:** fields our own code fills (`first_seen_at`, ...), as opposed to fields that come from the source (`title`, `due_at`).
