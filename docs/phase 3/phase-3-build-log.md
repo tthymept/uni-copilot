@@ -71,9 +71,50 @@ git add docs
 git commit -m "docs: wrap up phase 2 and plan phase 3"
 ```
 
+**Done (26 Oct):** bot created (`unicopilot_thyme_bot`), group joining disabled, token in `.env`, first message sent to the bot.
+
+## Step 1: notify/telegram.py (the door to Telegram)
+
+**New package `src/uni_copilot/notify/`** (`__init__.py` with a one-line description). Everything that pushes a message to you lives here.
+
+**`notify/telegram.py`:** for Telegram, the same job `client/http.py` does for NTULearn: one place that sends, retries, and keeps the secret out of logs.
+
+- **Settings:** `read_env_file()` reads `.env` (`KEY=VALUE` lines, `#` comments, optional quotes; also files saved with a byte-order mark, which some Windows editors add). `load_telegram_settings()` takes `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` from real environment variables first, then `.env`, and checks their shape (token = `digits:letters`, chat id = a number), so a typo fails with a clear message. The chat id is optional for setup (`need_chat_id=False`), since step 2 is how you find it.
+- **`TelegramSettings`:** a frozen dataclass whose `token` field has `repr=False`: printing the object shows `TelegramSettings(chat_id='42')`, never the token.
+- **`TelegramBot.send_message(text, html=False)`:**
+  - splits long text with `split_message()` (cuts only at line breaks; a single huge line is cut where it must be);
+  - one second between parts (Telegram allows about one message per second per chat);
+  - link previews off (`link_preview_options`);
+  - `html=True` adds `parse_mode="HTML"`. If Telegram answers 400 "can't parse entities", that part is resent as plain text via `strip_html()` and counted, so a message is never lost;
+  - returns `Sent(parts, plain_fallbacks)`, so `remind` (step 5) can log when a fallback happened.
+- **`escape()` / `strip_html()`:** `<`, `>`, `&` → `&lt;`, `&gt;`, `&amp;` for text from other people, and back again for the fallback.
+- **`telegram_length()`:** Telegram counts length in UTF-16 units (an emoji counts as 2), so we measure the same way. Tags are counted too, which only makes parts a little smaller than needed (safe).
+- **`_call()`:** every Bot API call is a POST with a JSON body to `https://api.telegram.org/bot<token>/<method>`. Retries 429 (waiting Telegram's `retry_after`), 5xx and network errors (2, 4, 8 s). Errors become `TelegramError(method, status, reason)`, with the token scrubbed out of Telegram's description. The URL is never logged. `raise ... from None` stops Python from attaching the original `requests` error, whose text contains the URL (and so the token).
+- **`get_me()`:** checks the token and returns the bot's public username.
+- **`find_chat_ids()`:** the one-off setup helper for step 2: one `getUpdates` call with `timeout: 0` (returns at once) and no `offset` (so nothing is marked as read; the plugin still gets the same messages later). Returns private chats only, as (chat id, first name). A 409 ("someone else is polling") gets a clear hint: stop the plugin first.
+- `sleep` and `session` can be swapped for fakes in tests (step 12), so tests send nothing and never really wait.
+
+Check (PowerShell):
+
+```
+uv run python -m uni_copilot.notify.telegram
+uv run python -m uni_copilot.notify.telegram --check
+```
+
+Expect from the first (offline, nothing sent): token "found and looks right", chat id "not set yet (step 2)"; 100 lines → 3 parts, each under 4096; a 10 000-character line → 3 parts; `telegram_length('ok 👍') = 5`; the escaped title `Lab &lt;draft&gt; &amp; notes` and its plain version; the token replaced by `<token>`; the settings printed without the token. From the second: `Bot username: unicopilot_thyme_bot` (one `getMe` call, nothing sent). Both passed on 26 Oct. `--send-test` (one real message) needs the chat id, so it's the test for step 2.
+
+Commit:
+
+```
+git add src/uni_copilot/notify docs
+git commit -m "feat(notify): add telegram sender with html fallback and token scrubbing"
+```
+
 ## Open items
 
 Everything not yet verified in Phase 3. Updated as steps finish.
+
+- **A real 429 or "can't parse entities" from Telegram:** handled in code, tested with a fake server in step 12; not seen live yet.
 
 - **Bun and the plugin on Windows** (step 11).
 - **Giving the plugin the token without typing it into a chat** (step 11).
@@ -85,4 +126,12 @@ Everything not yet verified in Phase 3. Updated as steps finish.
 
 ## Concepts
 
-Added as steps introduce them.
+- **Bot / BotFather / token:** a Telegram account run by a program / Telegram's official bot for creating bots / the bot's password, part of every Bot API URL.
+- **Bot API:** Telegram's HTTPS interface for bots: `https://api.telegram.org/bot<token>/<method>`, e.g. `sendMessage`, `getMe`, `getUpdates`. Every answer is JSON with `ok` and either `result` or `description`.
+- **Chat id:** the number of one chat. For your private chat with the bot it's the same as your Telegram user id.
+- **Long polling / `getUpdates`:** asking Telegram "any new messages for my bot?" and waiting for an answer. Only one program may do it per bot (the plugin, from step 11).
+- **`.env` file:** settings and secrets kept next to the code but never committed (git-ignored).
+- **Parse mode / escaping:** `parse_mode="HTML"` makes Telegram read `<b>` as bold; escaping turns other people's `<`, `&` into `&lt;`, `&amp;` so they show as written.
+- **UTF-16 units:** how Telegram counts message length: most characters are 1, emoji and some rare characters are 2.
+- **`field(repr=False)`:** leaves one dataclass field out of the text Python prints for the object.
+- **`raise ... from None`:** raises a new error without attaching the one that caused it (here, so the URL with the token doesn't show in a traceback).
