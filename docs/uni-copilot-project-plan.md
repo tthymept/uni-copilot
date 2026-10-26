@@ -2,7 +2,7 @@
 
 A personal academic agent for NTU students. It reads NTULearn (and later other sources), keeps track of what changed, and tells you what to do, in Telegram or Claude Code. It runs on your own computer with your own login, and never stores passwords.
 
-Status as of 24 Oct 2026: Phase 0 spike passed; **Phase 1 (`ntulearn-mcp` core) done**: 6 read-only tools working in Claude Code, 78 offline tests + 4 opt-in live tests. Build details: `docs/phase 1/phase-1-build-log.md` (overview: `docs/phase 1/phase-1-core.md`). **Phase 2 (event store) started 25 Oct**: decisions made, step 0 done; overview `docs/phase 2/phase-2-core.md`, details `docs/phase 2/phase-2-build-log.md`. "Verified" below means checked on my own account (GET only); "Not verified" means designed but not yet tested.
+Status as of 25 Oct 2026: Phase 0 spike passed. **Phase 1 (`ntulearn-mcp` core) done** (24 Oct): 6 read-only tools in Claude Code; details `docs/phase 1/`. **Phase 2 (event store) done** (25 Oct): local SQLite store, `uni-copilot sync` every 2 h via Task Scheduler, change detection, `pilot-mcp` (5 tools, "as of" in every answer, the default for study questions), `weekly-actions` skill; 139 offline tests + 4 opt-in live tests; details `docs/phase 2/phase-2-build-log.md` (overview: `docs/phase 2/phase-2-core.md`). **Phase 3 (Telegram) started** (26 Oct): decisions made, details `docs/phase 3/`. "Verified" below means checked on my own account (GET only); "Not verified" means designed but not yet tested.
 
 ---
 
@@ -121,7 +121,7 @@ Phase 1 tools are built as described below (✓). Every `course` argument accept
 - `recent_grades(since_days=14, course=None)`: only registered when `NTULEARN_ENABLE_GRADES=1`.
 
 ### 4.2 Prompts (one-command workflows, work in any MCP client)
-- `weekly_actions`: deadlines not yet submitted + announcements (~3 weeks) + messages + a logistics search for each test this week ("matric", "passport", "calculator", "venue", "bring") + opening/closing windows → checklist with sources; inferred items marked as inferred.
+- ✓ `weekly_actions` (built in Phase 2 as a Claude Code **skill**, `.claude/skills/weekly-actions/`, using the pilot store, not an MCP prompt; opening/closing windows wait for Phase 4): deadlines not yet submitted + announcements (~3 weeks) + messages + a logistics search for each test this week ("matric", "passport", "calculator", "venue", "bring") + opening/closing windows → checklist with sources; inferred items marked as inferred.
 - `whats_new`: what changed since the last check.
 - `prep_for_lecture`: this week's slides + transcript summary for one course.
 
@@ -140,6 +140,8 @@ Phase 1 tools are built as described below (✓). Every `course` argument accept
 
 ### 5.1 Event store (SQLite, local, git-ignored)
 
+Built in Phase 2 (✓): `.data/uni-copilot.sqlite`, code in `src/uni_copilot/store/` (`models.py`, `db.py`, `events.py`, `sync.py`, `queries.py`) and `src/uni_copilot/sources/ntulearn.py`. Phase 2 uses the sources `ntulearn_gradebook`, `ntulearn_announcement`, `ntulearn_message`, the kinds `deadline`, `announcement`, `message`, and the statuses `open`, `submitted`, `graded`, `done`; the rest of the lists below are for later phases.
+
 Every source is converted into one **event** shape:
 
 | Field | Meaning |
@@ -149,19 +151,21 @@ Every source is converted into one **event** shape:
 | `kind` | deadline, test, exam, class, announcement, message, opens, closes, grade_released, recording_available, holiday |
 | `course_code` / `course_site_id` | e.g. IE2108 / `_2706657_1` |
 | `title`, `body` | full post as light Markdown, labelled UNTRUSTED when shown (changed in Phase 2: was short text only) |
-| `starts_at`, `due_at` | stored in UTC, shown in SGT |
+| `starts_at`, `due_at`, `posted_at` | stored in UTC (fixed-format text with microseconds), shown in SGT; `posted_at` added in Phase 2 for announcements and messages |
 | `status` | open, submitted, graded, locked, done, cancelled |
 | `url` | link back to the source |
-| `content_hash` | detects edits |
-| `first_seen_at`, `last_seen_at`, `modified_at` | change tracking |
+| `content_hash` | detects edits: SHA-256 of title (deadlines), title + body (announcements), sender + body (messages) |
+| `found_in` | deadlines: calendar, gradebook (added in Phase 2) |
+| `first_seen_at`, `last_seen_at`, `modified_at`, `removed_at` | change tracking (`removed_at` added in Phase 2: removed events keep their row) |
 
 Other tables:
-- `event_changes`: what changed and when (new, edited, moved, removed). Powers `whats_new` and the digest.
-- `notifications_sent`: which reminder went out for which event, so nothing is sent twice.
-- `calendar_links`: `event_id` ↔ Google Calendar event id.
-- `state`: last sync time per source, last "seen" time per channel.
+- ✓ `event_changes`: what changed and when (new, edited, moved, status_changed, removed), with before/after. Powers `whats_new` and the digest.
+- `notifications_sent`: which reminder went out for which event, so nothing is sent twice. Key: event, tier (24h / 2h / sync_alert) and due time, so a moved deadline is reminded again. Written only after Telegram accepted the message. (Phase 3, schema version 2)
+- `marked_done`: items I handled outside NTULearn (Gradescope, Google Forms). Separate from `status`, so sync never overwrites it; reminders skip these. (Phase 3)
+- `calendar_links`: `event_id` ↔ Google Calendar event id. (Phase 6)
+- ✓ `state`: last sync time, last attempt, last error and notes per source; last "seen" time per channel.
 
-Phase 2 decisions (25 Oct):
+Phase 2 decisions and how they were built (25 Oct):
 - One event per merged deadline: `ntulearn_gradebook:<column id>` (calendar and gradebook share the column id), with where it was found kept as a field. `ntulearn_calendar` is not used as a separate source.
 - Stored text: title + the full body (light Markdown) + `content_hash`, so answers have the whole text without a live fetch. A ~280-character `preview` is used only in compact lists. Bodies are labelled UNTRUSTED wherever Claude sees them; the database is local and git-ignored.
 - `pilot-mcp` adds `get_event(event_id)` (one item in full); `whats_new` returns changed items with full bodies.
@@ -169,22 +173,31 @@ Phase 2 decisions (25 Oct):
 - Sync window: deadlines −14 to +120 days, announcements and messages the last 30 days.
 - Two comparisons: sync compares with the stored events and writes `event_changes` (detecting); `whats_new` reads `event_changes` after the channel's "last seen" bookmark (reporting).
 - Freshness: the store is only as fresh as the last sync. Asking never triggers a fetch; every `pilot-mcp` answer states "as of <last sync time> SGT". "Right now" questions use the live `ntulearn-mcp` tools.
-- Database code: built-in `sqlite3`, plain SQL, schema version in `PRAGMA user_version`.
+- Database code: built-in `sqlite3`, plain SQL, schema version in `PRAGMA user_version`; WAL mode; `save_events` runs in one transaction and takes the write lock first (`BEGIN IMMEDIATE`), so two syncs at once can't double-record.
+- Removal safety (in `store/sync.py`): a stored event missing from a fetch is marked removed only if that sync covered it: same source, a current-term course, the course didn't fail this time (from Phase 1's `notes`), and inside the window by more than 1 hour. A failure not about one course (e.g. the calendar) means no removals for that source. Leaving the window isn't removal.
+- A deadline whose status comes back `unknown` keeps the status already stored.
+- The first sync of a source writes a `new` line for everything it finds; `whats_new` leaves that import out (it's "started watching", not news).
+- Each sync takes ~1 min (~60 GET requests at ~1/s) and uses no Claude tokens.
 
 ### 5.2 `uni-copilot` CLI (scripts, no AI)
-- `uni-copilot sync`: pull sources → upsert events → record changes. Run by Windows Task Scheduler (e.g. every 2 hours, 07:00–23:00).
-- `uni-copilot remind`: find unfinished deadlines due in 24 h / 2 h and tests tomorrow → send Telegram messages → record in `notifications_sent`. Every 30 min.
-- `uni-copilot notify "<text>"`: send a Telegram message (used by the digest task).
+- ✓ `uni-copilot sync`: pull sources → upsert events → record changes; prints counts per source; exit code 1 if a source failed. Run by Windows Task Scheduler every 2 hours, 07:00–23:00 (✓ `scripts/schedule-sync.ps1`: windowless `pythonw`, catches up after a missed run, optional wake from sleep; output in `.data/sync.log` via `--log`).
+- ✓ `uni-copilot status` ("as of" per source, errors, counts), `uni-copilot events` (deadlines and posts from the store), `uni-copilot changes` (the diary with titles). Phase 2.
+- `uni-copilot remind`: find open deadlines (not submitted, not marked done) that have come within 24 h / 2 h → one Telegram message per run, grouped, soonest first, ending with "as of" → record in `notifications_sent`. Every 30 min, all day, at :10 and :40 (no quiet hours, decided 26 Oct). Tests are reminded like any deadline; their logistics come from the AI digest. Also one alert per failure streak when a sync attempt fails and the last success is over 6 h old. Store-only: never contacts NTULearn. `--dry-run` prints instead of sending. (Phase 3)
+- `uni-copilot notify "<text>"` (or `-` for stdin): send a plain-text Telegram message, for scripts and testing. (Phase 3)
+- `uni-copilot done <event_id>` (`--undo`): mark an item done locally. `uni-copilot telegram-chat-id`: one-off setup helper, before the plugin polls. (Phase 3)
 
 ### 5.3 `pilot-mcp` tools (local state only; never touches NTULearn)
-- `list_events(days=7, kinds=None, course=None)`: from the store, fast.
-- `whats_new(since="last_seen", channel="telegram")`: changes since the channel last looked. Only reads.
-- `get_event(event_id)`: one item with its full body (Phase 2).
-- `mark_seen(channel)`: moves the channel's "last seen" bookmark (Phase 2).
-- `sync_status()`: last sync time per source and failed sources (Phase 2). Every pilot result carries `as_of`.
+
+Built in Phase 2 (✓): `src/uni_copilot/pilot_mcp/`, registered in `.mcp.json`, all five pre-allowed. Every result carries `as_of` (oldest last sync, SGT, minutes old, failed sources), and the server instructions make it **the default for study questions** (Claude says "as of", and uses the live `ntulearn` tools only for "right now" checks or what the store doesn't have).
+
+- ✓ `list_events(days=7, kinds=None, course=None)`: deadlines due in the next N days + posts from the last N days, with previews.
+- ✓ `whats_new(channel="terminal")`: changes since the channel last looked, with full bodies of new/edited posts, plus `checked_at`. Only reads.
+- ✓ `get_event(event_id)`: one item with its full body.
+- ✓ `mark_seen(channel, up_to=checked_at)`: moves the channel's "last seen" bookmark (only writes our own state).
+- ✓ `sync_status()`: last sync, last error and notes per source, and counts.
 - `add_manual_event(...)`: for forwarded messages or things I tell the bot; always confirmed first.
-- `mark_done(event_id)`: hide an item I've handled outside NTULearn.
-- `send_telegram(text)`: push a message to my chat.
+- `mark_done(event_id, undo=False)`: an item I've handled outside NTULearn; shown as "done (marked by you)", no more reminders. Local only, undoable, pre-allowed, but Claude confirms in the chat first and only when I asked. (Phase 3)
+- `send_telegram(text)`: push a plain-text message, only ever to my own chat id from `.env`. Used by the morning digest. Pre-allowed. (Phase 3)
 - `week_info(date)`: teaching week number, recess, holidays (from the academic calendar file).
 - `link_calendar_event(event_id, gcal_event_id)`: bookkeeping for calendar sync.
 
@@ -195,9 +208,9 @@ Phase 2 decisions (25 Oct):
 | # | Feature | How it runs | Uses AI? | Phase |
 |---|---|---|---|---|
 | 1 | **Ask from Telegram** ("what's due this week?", "what did the IE2108 prof say about the quiz?") | Claude Code with the Telegram channel plugin, running on my PC | Yes | 3 |
-| 2 | **Morning digest** (only if something changed): today/tomorrow actions, new announcements in one line each, anything moved or edited | Claude Desktop local scheduled task, weekdays ~07:30 → `uni-copilot notify` | Yes | 3 |
-| 3 | **Deadline reminders**: 24 h and 2 h before unfinished items; "test tomorrow: bring matric card" the evening before | `uni-copilot remind` via Task Scheduler | No | 3 |
-| 4 | **Weekly actions checklist** with sources | `weekly_actions` prompt, from Telegram or Claude Code | Yes | 2–3 |
+| 2 | **Morning digest** (only if something changed): today/tomorrow actions, new announcements in one line each, anything moved or edited, tests today/tomorrow with what to bring (inferred, with the source post) | Task Scheduler runs headless `claude -p` with the `morning-digest` skill, daily 07:30 → `pilot.send_telegram` (changed 26 Oct from a Desktop routine, which is the fallback) | Yes | 3 |
+| 3 | **Deadline reminders**: 24 h and 2 h before unfinished items, day or night (no quiet hours) | `uni-copilot remind` via Task Scheduler, every 30 min | No | 3 |
+| 4 | **Weekly actions checklist** with sources | `weekly-actions` skill (✓ Phase 2 in Claude Code; Telegram in Phase 3) | Yes | 2–3 |
 | 5 | **Lecture notes**: transcript (corrected using slides) → notes, revision sheet, practice questions in my notes folder; Telegram "Week 10 notes ready" | Claude Code skill | Yes | 5 |
 | 6 | **Calendar sync**: proposes deadlines for Google Calendar; I confirm by replying; dedupe via `[uni-copilot:<event_id>]` marker in the event description | Claude Code skill + Google Calendar connector | Yes | 6 |
 | 7 | **Workload planner**: counts back from deadlines/exams, checks free time, proposes study blocks | Claude Code skill | Yes | 6 |
@@ -217,7 +230,15 @@ Phase 2 decisions (25 Oct):
 uni-copilot/
 ├── CLAUDE.md                      # short rules for Claude Code
 ├── docs/
-│   └── uni-copilot-project-plan.md
+│   ├── uni-copilot-project-plan.md
+│   ├── phase 1/                   # phase-1-core.md (overview), phase-1-build-log.md (details)
+│   ├── phase 2/                   # phase-2-core.md, phase-2-build-log.md
+│   └── phase 3/                   # phase-3-core.md, phase-3-build-log.md
+├── scripts/
+│   ├── schedule-sync.ps1          # registers the "uni-copilot sync" scheduled task (Phase 2)
+│   ├── schedule-remind.ps1        # "uni-copilot remind" every 30 min (Phase 3)
+│   ├── schedule-digest.ps1        # headless claude -p morning digest, 07:30 (Phase 3)
+│   └── start-telegram.ps1         # opens the Telegram Q&A session (Phase 3)
 ├── src/uni_copilot/
 │   ├── ntulearn_mcp/              # MCP server 1: live NTULearn + NTULearnVideo (read-only)
 │   │   ├── server.py              # tools, prompts
@@ -227,14 +248,15 @@ uni-copilot/
 │   │   ├── parsers/
 │   │   ├── cache.py
 │   │   └── models.py
-│   ├── store/                     # SQLite schema, upserts, change detection
-│   ├── sources/                   # adapters: ntulearn → events, academic calendar, exams, timetable
-│   ├── pilot_mcp/                 # MCP server 2: store, manual events, notify
-│   ├── notify/telegram.py         # Bot API sendMessage
-│   └── cli.py                     # uni-copilot sync | remind | notify
+│   ├── store/                     # models.py, db.py (schema), events.py (upsert + change detection),
+│   │                              # sync.py (one sync, removal rules), queries.py (read side)
+│   ├── sources/                   # ntulearn.py (adapters + content_hash); later academic calendar, exams, timetable
+│   ├── pilot_mcp/                 # MCP server 2: server.py + models.py (store; later manual events, notify)
+│   ├── notify/telegram.py         # Bot API sendMessage, .env reader (Phase 3)
+│   └── cli.py                     # uni-copilot sync | status | events | changes (Phase 3: remind | notify | done)
 ├── .claude/
-│   ├── settings.json              # allow rules for read-only tools
-│   └── skills/                    # weekly-actions, morning-digest, calendar-sync,
+│   ├── settings.json              # allow rules for read-only tools (+ pilot mark_seen)
+│   └── skills/                    # weekly-actions (✓), morning-digest, calendar-sync,
 │                                  # lecture-notes, workload-planner, weekly-review
 ├── data/                          # academic_calendar.yaml, exams.csv, timetable.yaml (my own, git-ignored)
 ├── tests/
@@ -261,17 +283,18 @@ Local, never committed: `.auth/profile` (browser profile with login cookies), `.
 2. **Google Calendar**: claude.ai → Settings → Connectors → Google Calendar → Connect. Block "delete event". Check `/mcp` in Claude Code.
 3. **Telegram bot**: create with BotFather. Same bot for both directions:
    - Q&A: `/plugin install telegram@claude-plugins-official`, `/telegram:configure <token>`, start with `claude --channels plugin:telegram@claude-plugins-official`, pair, then `/telegram:access policy allowlist`. Needs Bun.
-   - Push: `uni-copilot notify` calls `sendMessage` with the same token and my chat id from `.env`. Sending doesn't conflict with the plugin's polling; never run a second poller.
-4. **Permissions**: allow rules in `.claude/settings.json` for all `ntulearn` tools and read-only `pilot` tools, so Telegram questions don't stall on prompts. Writes (`add_manual_event`, calendar writes) always ask. Never `--dangerously-skip-permissions`.
+   - Push: `notify/telegram.py` calls `sendMessage` with the same token and my chat id from `.env` (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`; I type them in myself, never into a Claude chat). Sending doesn't conflict with the plugin's polling; never run a second poller (the one-off `telegram-chat-id` helper runs before the plugin is set up).
+   - Format (decided 26 Oct): script messages use Telegram's HTML mode, tags added only by our code, all NTULearn text escaped, plain-text resend if Telegram rejects the formatting. The digest (`send_telegram`, written by Claude) is plain text. Link previews off.
+4. **Permissions**: allow rules in `.claude/settings.json` for the `ntulearn` tools (except `login`) and the `pilot` tools (✓ Phase 2: the 4 read-only ones plus `mark_seen`, which only moves a local bookmark), so Telegram questions don't stall on prompts. Writes (`add_manual_event`, calendar writes) always ask. Never `--dangerously-skip-permissions`.
 5. **Scheduling**:
-   - Windows Task Scheduler: `uni-copilot sync` (every 2 h), `uni-copilot remind` (every 30 min).
-   - Claude Desktop → Code → Routines → New routine → Local: morning digest (weekdays), weekly review (Sunday). Prompt handles late runs ("if after noon, only today and tomorrow").
+   - Windows Task Scheduler: `uni-copilot sync` (every 2 h, 07:00–23:00; ✓ Phase 2 via `scripts/schedule-sync.ps1`), `uni-copilot remind` (every 30 min all day, at :10 and :40, Phase 3), morning digest (headless `claude -p`, daily 07:30, Phase 3). Chosen over GitHub Actions: a cloud runner would need the Microsoft sign-in cookies and would sign in from data-centre IPs.
+   - Digest prompt handles late runs ("if after noon, only today and tomorrow"). Fallback if headless runs misbehave: Claude Desktop → Code → Routines → New routine → Local. Weekly review (Sunday, Phase 8) uses whichever works.
    - "Keep computer awake" on; PC must be on for anything to run.
-6. **Always-on session for Telegram Q&A**: a terminal left open running `claude --channels ...` in the repo folder.
+6. **Session for Telegram Q&A**: a terminal left open running `claude --channels ...` in the repo folder, started by `scripts/start-telegram.ps1` when I want it and restarted about once a day (Phase 3). Starting at logon later, once stable.
 
 ### 7.3 Request flow examples
-- **"What do I need to do this week?" (Telegram)** → channel plugin → Claude Code → `pilot.list_events` + `ntulearn.recent_announcements` + `ntulearn.search` for test logistics → checklist with sources → reply in Telegram.
-- **Morning digest** → scheduled task → `pilot.whats_new(channel="telegram")` → nothing changed: stop, no message; changed: Claude writes digest → `uni-copilot notify`.
+- **"What do I need to do this week?" (Telegram)** → channel plugin → Claude Code → `weekly-actions` skill → `pilot.list_events` (deadlines, recent posts) + `pilot.get_event` (full text of every post from the last 7 days) + `pilot.whats_new` → checklist with sources and "as of" → reply in Telegram. (✓ in the terminal, Phase 2; `ntulearn.search` for older material comes in Phase 4.)
+- **Morning digest** → Task Scheduler → `claude -p` → `morning-digest` skill → `pilot.whats_new(channel="telegram")` → nothing changed: stop, no message; changed: Claude writes digest → `pilot.send_telegram` → `pilot.mark_seen(channel="telegram")`.
 - **Reminder** → `uni-copilot remind` → store query → Telegram message. No AI.
 
 ---
@@ -305,12 +328,12 @@ Each phase ends with something usable.
 - Opens/closes windows moved to Phase 4 (need the content tree).
 - Done when: Claude Code answers "what's due this week?" correctly for all my courses. ✓ Checked against NTULearn on 24 Oct; one bug found and fixed (message senders showed as "GIVEN_NAME").
 
-**Phase 2: event store** (started 25 Oct 2026)
-- SQLite schema, `uni-copilot sync`, change detection, `pilot-mcp` (`list_events`, `whats_new`, `mark_seen`, `sync_status`), `weekly_actions` skill (changed from prompt), optional Task Scheduler sync.
-- Done when: two syncs in a row report only real changes.
+**Phase 2: event store** (done 25 Oct 2026)
+- SQLite schema, `uni-copilot sync` (+ `status`, `events`, `changes`), change detection, `pilot-mcp` (`list_events`, `whats_new`, `get_event`, `mark_seen`, `sync_status`), `weekly-actions` skill (changed from prompt), Task Scheduler sync every 2 h.
+- Done when: two syncs in a row report only real changes. ✓ 25 Oct: two scheduled runs in a row (22:03, 22:06) reported 0 changes; plain questions in a fresh Claude Code session went to pilot and the skill by themselves, and matched NTULearn.
 
-**Phase 3: Telegram**
-- Channel plugin for Q&A, `uni-copilot notify`, `uni-copilot remind`, morning digest routine.
+**Phase 3: Telegram** (started 26 Oct 2026; steps and decisions in `docs/phase 3/phase-3-core.md`)
+- Channel plugin for Q&A, `uni-copilot notify`, `uni-copilot remind`, morning digest (headless `claude -p`), `mark_done`, `send_telegram`.
 - Done when: I get a correct digest and reminders for a week without opening NTULearn.
 
 **Phase 4: content and search**
@@ -337,7 +360,7 @@ Each phase ends with something usable.
 
 - Offline unit tests with **synthetic** fixtures (made-up courses, announcements, a small fake transcript JSON).
 - Parsers tested on fixture HTML: Ultra document bodies, embedded-video links, locked items.
-- Store tests: dedupe, edits, moved deadlines, removed items, reminder de-duplication.
+- Store tests: dedupe, edits, moved deadlines, removed items, reminder de-duplication. ✓ Phase 2 (except reminders, Phase 3): `tests/test_store.py`, `test_sources.py`, `test_sync.py` (failure rules with fake clients), `test_queries.py`, `test_pilot.py`.
 - Opt-in live smoke tests (my account, GET only) that print counts and status codes only.
 - MCP Inspector (`uv run mcp dev ...`) for manual tool checks.
 
@@ -345,7 +368,10 @@ Each phase ends with something usable.
 
 ## 11. Open questions
 
-- Session: how long a session survives with no calls, or with calls 2 h apart (the planned sync interval). Silent sign-in, 10-min keepalive and Cloudflare were verified 24 Oct. Design for it anyway: silent re-login on 401 (built in Phase 1).
+- Session: how long a session survives with no calls, or with calls 2 h apart (the sync interval). Silent sign-in, 10-min keepalive and Cloudflare were verified 24 Oct. Each sync is a new process that signs in silently from the profile anyway, so this matters less now; `.data/sync.log` over the next days will show any sign-in failures.
+- Whether the laptop wakes from sleep for a scheduled sync (`schedule-sync.ps1 -Wake`).
+- NTU's rules on automated access to NTULearn (read-only, paced, own account): not checked yet; Phase 9 policy check.
+- Whether Claude picks the `weekly-actions` skill and pilot by itself from Telegram too (verified in the terminal, Phase 2).
 - Not yet verified endpoints: Discussions, Groups, content availability windows.
 - Whether reading `conversations` via the API marks messages as read (I had 0 unread when tested).
 - Past-due gradebook columns with no row for me: missed work, or items with nothing to submit? (2 cases on 24 Oct.)
@@ -356,13 +382,14 @@ Each phase ends with something usable.
 - Whether the grades endpoint ever shows unreleased grades.
 - What the other `x-bb-blti-link` items are (other external tools).
 - Whether other courses embed videos with transcripts.
-- Telegram channel plugin: does it support inline buttons? Can its reply tool be used from a scheduled run? (Design assumes reply-to-confirm and a separate notify script.)
+- Telegram channel plugin: does it support inline buttons? Can its reply tool be used from a scheduled run? (Design assumes reply-to-confirm and our own `sendMessage`, so neither is needed.) Also: does it run on Windows with Bun; can it take the token from its own `.env` instead of `/telegram:configure <token>` in a chat; does a permission prompt reach the phone? (Phase 3 step 11)
+- Headless `claude -p` from Task Scheduler: windowless, loads the project MCP servers and `.claude/settings.json`? (Phase 3 step 10)
 - Outlook connector availability with NTU's Microsoft tenant.
 - Official sources and formats for the academic calendar and exam timetable.
 
 ---
 
-## Appendix A: Verified NTULearn facts (23–24 Oct 2026, my account, GET only)
+## Appendix A: Verified NTULearn facts (23–25 Oct 2026, my account, GET only)
 
 **Platform and login**
 - NTULearn = Blackboard Learn Ultra at `https://ntulearn.ntu.edu.sg`. Login via Microsoft Entra ID (SAML). "Stay signed in" makes re-login silent in my everyday Chrome.
@@ -416,12 +443,19 @@ Each phase ends with something usable.
 - All 51 gallery recordings (5 sites) have `.txt` + `.json`. Use JSON: `w`, `s`/`e` (ms), `a` (confidence). Auto-captions mishear terms ("breadth-first" → "breast research"); correct with slides.
 - Module-embedded videos (IE2110): `ultraDocumentBody` has `<a data-bbtype="embedded-app" data-bbfile='{...}'>`, placement "Kaltura Media" (`_1326_1`), URL `.../browseandembed/index/media/entryid/<entryId>/...`. The 4 checked had no transcripts or captions.
 
+**Phase 2 findings (25 Oct)**
+- Bodies: of 114 announcements (180 days), the longest was ~4000 characters (median ~770); of 25 messages, longest ~3800 (median ~340). Phase 1's 4000-character cut hit 1 announcement, so the limit is now 20,000 (a safety net only).
+- A full sync (deadlines −14/+120 days, announcements and messages 30 days) takes ~63 s: deadlines 27 s, announcements 16 s, messages 20 s. 34 deadlines, 31 announcements, 15 messages.
+- `content_hash` is stable across real re-fetches: two syncs in a row → 0 changes (several times, including two scheduled runs). Cross-posted announcements kept the same id.
+- An announcement that passed 30 days old stopped being fetched and stayed in the store as active (not "removed"), as designed.
+- A windowless `pythonw` run and a run started by Task Scheduler both signed in silently from the saved profile (exit code 0).
+
 **Grades (structure only)**
 - `GET /learn/api/public/v2/courses/{courseId}/gradebook/users/{userId}`: `columnId`, `status`, `displayGrade`, `exempt`, `changeIndex`, `firstRelevantDate`, `lastRelevantDate`.
 
 ## Appendix B: Tech stack
 
-- Python ≥ 3.10 with `uv`. Windows + PowerShell.
+- Python ≥ 3.12 with `uv`. Windows + PowerShell.
 - MCP Python SDK `mcp>=2.3,<3`: `from mcp.server import MCPServer`; `@mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))` (`from mcp.types import ToolAnnotations`); `mcp.run(transport="stdio")`; raise `ToolError` for errors the model should see.
 - Playwright (Chromium), `requests`, SQLite (stdlib), PyMuPDF or pypdf, python-pptx, PyYAML.
 - Claude Code: channels (Telegram plugin, research preview, needs Bun), Desktop local scheduled tasks, Remote Control, Google Calendar connector.

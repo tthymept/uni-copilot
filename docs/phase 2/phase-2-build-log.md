@@ -7,32 +7,34 @@ What each finished step changed, how to test it, and its commit. Unverified poin
 ### The layers
 
 ```
-NTULearn
-  │   GET only, 1 request/s (Phase 1: client/http.py)
+Task Scheduler (every 2 h, 07:00–23:00; scripts/schedule-sync.ps1)   or you: uv run uni-copilot sync
+  │   pythonw -m uni_copilot.cli --log .data/sync.log sync   (no window, no AI, 0 Claude tokens)
   ▼
-Phase 1 clients ──── DeadlinesClient, AnnouncementsClient, MessagesClient (ntulearn_mcp/client/)
-  │   normal Python imports and method calls, no MCP
+cli.py ── cmd_sync ──► store/sync.py: run_sync
+  │                      ├─ Phase 1 clients (DeadlinesClient, AnnouncementsClient, MessagesClient)
+  │                      │    └─ NTULearn, GET only, ~1 request/s (client/http.py)
+  │                      ├─ sources/ntulearn.py: adapters → Events with content_hash
+  │                      ├─ failed_courses / make_covers: who may be marked removed
+  │                      └─ store/events.py: save_events (diff + upsert + diary, one transaction)
   ▼
-uni-copilot sync ─── a plain script, no AI (cli.py → store/sync.py)
-  │   sources/ntulearn.py turns Phase 1 results into events (adapters)
+SQLite event store ─ .data/uni-copilot.sqlite (store/db.py)
+  │   tables: events (now), event_changes (diary), state (sync times, errors, bookmarks)
   ▼
-SQLite event store ─ .data/uni-copilot.sqlite (store/db.py, store/events.py)
-  │   tables: events (now), event_changes (diary), state (sync times, bookmarks)
-  ▼
-pilot-mcp ────────── reads the store only, never NTULearn (pilot_mcp/server.py → store/queries.py)
-  │   MCP protocol, like Phase 1
-  ▼
-Claude ("what's new?") ── answers "as of <last sync> SGT"
+store/queries.py ── list_events, get_event, whats_new, freshness, mark_seen
+  ├──► pilot_mcp/server.py (+ models.py) ── MCP ──► Claude: the default for study questions,
+  │                                                  always "as of <last sync> SGT"
+  │      └─ .claude/skills/weekly-actions ── "what do I need to do this week?" → checklist
+  └──► cli.py: uni-copilot status / events / changes   (your terminal)
 ```
 
-`ntulearn-mcp` from Phase 1 is still there next to `pilot-mcp`, for live details and "right now" questions.
+`ntulearn-mcp` from Phase 1 is still there next to `pilot-mcp`, for live details and "right now" questions. Who answers what is set in both servers' instructions and in `CLAUDE.md` ("Answering study questions").
 
-Filled in step by step as files are built.
+Restaurant version, continuing Phase 1's: the store is the **pantry and the logbook**. Sync is the **delivery run** every 2 hours (no chef needed: it just restocks and writes down what changed). `pilot-mcp` is a **second waiter** who serves from the pantry instantly and always says when it was restocked. `ntulearn-mcp` is the waiter who runs to the supplier when you want it fresh this minute.
 
 ### Why a database, and how fresh it is
 
 - **Memory, not speed:** NTULearn never tells us when something changes, so we compare what's there now with what was saved before. That needs the earlier copy saved somewhere.
-- **Freshness:** the store is only as fresh as the last sync (every 2 hours once step 12 is set up, or by hand). Asking never triggers a fetch. Every `pilot-mcp` answer says "as of <last sync time> SGT".
+- **Freshness:** the store is only as fresh as the last sync (every 2 hours via Task Scheduler, or by hand). Asking never triggers a fetch. Every `pilot-mcp` answer says "as of <last sync time> SGT".
 
 ### The three tables
 
@@ -934,17 +936,114 @@ git add scripts/schedule-sync.ps1 src/uni_copilot/cli.py CLAUDE.md "docs/phase 2
 git commit -m "feat(cli): add log option and scheduled sync task script"
 ```
 
+## Step 13: final check and wrap-up
+
+**The "done" test (25 Oct, by you, plus the logs). Everything passed. Phase 2 is done.**
+
+1. **Scheduled task:** registered with `-RunNow`. `.data\sync.log` shows two runs (22:03 and 22:06 SGT), both `exit code 0`; `LastTaskResult : 0`; next run 23:00. So a sync started by Task Scheduler itself signs in silently.
+2. **Two syncs in a row → only real changes:** both runs reported **`0 change(s)`** for all three sources. That's the plan's done test, on your real store.
+3. **A fresh Claude Code session** (plain `claude`, nothing preloaded), questions with no "using pilot" and no slash command:
+   - "what do I need to do this week?" → the `weekly-actions` skill with pilot tools only, "As of ..." first, including the IE2108 revision form (the 10f fix);
+   - "what's due this week?" → `pilot.list_events` with "as of";
+   - "what's new?" → `pilot.whats_new`, then `mark_seen`;
+   - "check NTULearn now for new announcements" → the live `ntulearn` tool, saying it checked live.
+4. **Compared with NTULearn** in the browser: matched.
+
+**Also seen in the real data:** the store holds **31** announcements while the latest syncs see **30**. One passed 30 days old, stopped being fetched, and was correctly **not** marked removed (the "leaving the window isn't removal" rule, live).
+
+**13a. `docs/uni-copilot-project-plan.md`:**
+- Status line: Phase 2 done.
+- 4.2: `weekly_actions` built as a skill.
+- 5.1: built, with the new fields (`posted_at`, `found_in`, `removed_at`), what `content_hash` covers, which tables exist, and the safety rules.
+- 5.2: `status` / `events` / `changes` / `--log`, the schedule script.
+- 5.3: the 5 pilot tools as built.
+- Section 6 row 4; 7.1 repo layout (docs folders, `scripts/`, store files); 7.2 permissions and scheduling (and why not GitHub Actions); 7.3 the weekly-actions flow.
+- Roadmap: Phase 2 done with the check.
+- Testing: the store tests that exist.
+- Open questions: session note updated; added `-Wake`, NTU's rules on automated access, and skill pickup from Telegram.
+- Appendix A: "Phase 2 findings" (body lengths, sync time, hash stability, the window rule live, scheduled sign-in).
+- Appendix B: Python ≥ 3.12.
+
+**13b. `docs/phase 2/phase-2-core.md`:** status "all 14 steps done", step 13 marked done.
+
+**13c. This log:**
+- "How it all connects" now shows the finished pipeline, from Task Scheduler to Claude.
+- Added this step, plus "Phase 2 summary" and "Changes from the original Phase 2 plan".
+- Open items cleaned up.
+
+Test (PowerShell):
+
+```
+uv run pytest
+uv run uni-copilot status
+```
+
+Expect 139 passed, 4 skipped; `status` "as of" the latest scheduled run.
+
+Commit:
+
+```
+git add docs
+git commit -m "docs: mark phase 2 done and record final check"
+```
+
+## Phase 2 summary
+
+- **What you have:**
+  - A local event store (`.data/uni-copilot.sqlite`) that remembers every deadline, announcement and message, and **what changed** (new, edited, moved, status changed, removed).
+  - It's filled every 2 hours by a scheduled script (0 Claude tokens).
+  - Claude reads it through `pilot-mcp` (5 tools), instantly, always saying "as of".
+  - "What do I need to do this week?" becomes a checklist with sources (`weekly-actions` skill).
+- **How it's built:**
+  - `uni-copilot sync` → Phase 1 clients → adapters (`sources/ntulearn.py`) → `save_events` (diff + upsert + diary in one transaction) → SQLite.
+  - `pilot-mcp` and the CLI read it through `store/queries.py`.
+  - See "How it all connects" at the top.
+- **Safety:**
+  - Still GET-only towards NTULearn; Claude can only move a local bookmark.
+  - Nothing is marked removed unless that sync really covered it (failed courses, failed sources and items leaving the window are kept).
+  - A status that couldn't be read never undoes a known one.
+  - Other people's text is labelled UNTRUSTED; no grades anywhere.
+  - Sign-in cookies and course data never leave your PC.
+- **Tests:** 139 offline (61 new, including the failure rules with fake clients, checked by breaking the code on purpose) + 4 opt-in live.
+- **Verified on your account (25 Oct):**
+  - a sync takes ~63 s;
+  - hashes are stable;
+  - two syncs in a row → 0 changes (by hand and scheduled);
+  - windowless and scheduled sign-in work;
+  - the window rule holds;
+  - plain questions go to pilot and the skill by themselves.
+- **Next:** Phase 3, Telegram (Q&A through the channel plugin, `uni-copilot notify` / `remind`, the morning digest).
+
+## Changes from the original Phase 2 plan
+
+- **Full bodies stored, not short text** (your request after step 1): answers have the whole post without a live fetch. `preview` is only for compact lists. The plan's "no full bodies of untrusted text" was replaced by UNTRUSTED labels + local-only storage. Phase 1's 4000-character body cut raised to 20,000 (it cut 1 real post).
+- **One deadline source** (`ntulearn_gradebook:<column id>`) instead of separate calendar and gradebook sources; `found_in` records where it was seen.
+- **New event fields:** `posted_at`, `found_in`, `removed_at` (a removed event keeps its row).
+- **Freshness rule** (your decision): never fetch on ask; always say "as of".
+- **More `pilot-mcp` tools:** `get_event`, `sync_status` and `mark_seen` (with `up_to=checked_at`) next to `list_events` and `whats_new`, which only reads.
+- **The first-sync import isn't news:** `whats_new` leaves out each source's first-sync lines.
+- **Safety rules added in sync:** failed course / failed source / window exit → no removal, a 1-hour edge margin, unknown status keeps the known one, and a write lock so two syncs at once can't double-record.
+- **Extra CLI commands:** `status`, `events`, `changes`, `--log`.
+- **`weekly_actions` is a skill**, not an MCP prompt, and it reads every recent post in full (10f).
+- **Routing:** pilot is the default for study questions (both servers' instructions + `CLAUDE.md`); nobody types "using pilot".
+- **Scheduling on your PC** with a script (`scripts/schedule-sync.ps1`, windowless `pythonw`, catch-up after missed runs, optional wake), not GitHub Actions.
+- **Phase 1 touched:** `DeadlinesClient.upcoming(past_days=...)`, `BODY_MAX_CHARS` 20,000, the `ntulearn` instructions ("not the default"), and one Phase 1 test (permission rules) adjusted for the pilot rules.
+
 ## Open items
 
-Not verified yet. Each is checked in the step named in `phase-2-core.md` ("Things to check during Phase 2").
+Everything not yet verified at the end of Phase 2. Each is safe to leave for now: the code either handles both cases or it only matters later.
 
-- ~~Hash stability across re-fetches~~: verified 25 Oct (step 5), two live syncs in a row → no changes.
-- ~~Sync time~~: verified 25 Oct (step 5), ~63 s first run, ~47 s with the gradebook columns cached.
+**Verified during Phase 2 (kept for the record):**
+- hash stability across re-fetches;
+- sync time (~63 s);
+- a scheduled run signs in silently;
+- Claude picks the skill and pilot for plain questions in a fresh session, and states "as of".
+
+**Still open:**
 - **Failure rules only tested offline.** Failed course, failed calendar, failed source, sign-in failure and unknown status are covered by `tests/test_sync.py` with fake clients (step 11), not live: we don't break NTULearn on purpose. The real wording of NTULearn's failure notes comes from Phase 1's code, so a test can't drift from it unless that code changes.
-- Sessions 2 hours apart, and headless sign-in from Task Scheduler (step 12). A windowless `pythonw` run signed in silently (25 Oct). A run started by Task Scheduler itself, and runs after a long idle gap, are checked via `.data\sync.log` once the task is registered.
-- Whether the laptop wakes from sleep for a run (`-Wake`).
-- Whether Claude Code picks the `weekly-actions` skill for a plain question (step 10).
-- Whether Claude states "as of" in every answer (step 13).
+- **Long idle gaps.** E.g. the first 07:00 run after a night with no calls. Each sync signs in silently in a new process, so it should work; `.data\sync.log` will show any `LoginRequired`.
+- **Whether the laptop wakes from sleep for a run** (`schedule-sync.ps1 -Wake`), if you turn it on.
+- **Telegram:** whether Claude picks the skill and pilot by itself there too (Phase 3).
 - **A deadline moved far outside the sync window** (e.g. to +5 months) disappears from the fetch while its *stored* due date is still inside the window, so step 5 would mark it removed rather than moved. Rare; when it comes back into the window it reappears as `new` (before = "removed"). Revisit if it ever happens.
 - **Which id a merged cross-post keeps.** Phase 1's `merge_duplicates` keeps the newest copy's id. If two copies have the same time, the order sites are fetched in decides. If that ever flips between syncs, it would look like "removed" + "new". Stable in the step 5 two-syncs test; keep an eye on it.
 - **Later (noted 25 Oct):** a live `get_announcement(id)` tool in `ntulearn-mcp` (maybe `get_message` too): fetch one post by id instead of a whole course's list. Recorded in the plan, section 4.1 "News". Not needed in Phase 2, because `get_event` serves full bodies from the store.
