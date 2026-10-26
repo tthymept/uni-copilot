@@ -9,8 +9,11 @@ In plain words:
   uni-copilot events   deadlines due in the next N days and posts from the
                        last N days, from the store (instant, no NTULearn)
   uni-copilot changes  the diary of the last N days, with titles
+  uni-copilot notify "<text>"   send a plain-text Telegram message to your chat
+                       ("-" instead of the text reads it from stdin)
+  uni-copilot telegram-chat-id  setup: find your chat id after you messaged the bot
 
-  Phase 3 adds `remind` and `notify`.
+  Phase 3 adds `remind` and `done` later.
 
 How a command reaches the code (same idea as the MCP tools in Phase 1):
   pyproject.toml  [project.scripts] uni-copilot = "uni_copilot.cli:main"
@@ -34,6 +37,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from uni_copilot.ntulearn_mcp.models import sgt_text
+from uni_copilot.notify.telegram import (
+    ENV_FILE,
+    TelegramBot,
+    TelegramError,
+    TelegramNotConfigured,
+    load_telegram_settings,
+)
 from uni_copilot.store.db import DB_PATH, get_state, open_db, schema_version, time_from_db
 from uni_copilot.store.queries import EventChange, changes_since, first_sync_times, freshness, is_first_sync, list_events
 from uni_copilot.store.sync import run_sync
@@ -62,6 +72,9 @@ def main(argv: list[str] | None = None) -> int:
     events.add_argument("--course", help="part of a course code, e.g. DA3")
     changes = commands.add_parser("changes", help="the diary of changes, with titles")
     changes.add_argument("--days", type=int, default=7, help="changes found in the last N days (default 7)")
+    notify = commands.add_parser("notify", help="send a plain-text Telegram message to your chat")
+    notify.add_argument("text", help='the message, or "-" to read it from stdin')
+    commands.add_parser("telegram-chat-id", help="setup: find your chat id (send the bot a message first)")
     parser.add_argument("--log", type=Path, help="append all output to this file instead of the screen")
     args = parser.parse_args(argv)
 
@@ -89,7 +102,11 @@ def _run(args: argparse.Namespace) -> int:
         return cmd_events(args.db, args.days, args.kind, args.course)
     if args.command == "changes":
         return cmd_changes(args.db, args.days)
-    run = {"sync": cmd_sync, "status": cmd_status}[args.command]
+    if args.command == "notify":
+        return cmd_notify(args.text)
+    if args.command == "telegram-chat-id":
+        return cmd_telegram_chat_id()
+    run ={"sync": cmd_sync, "status": cmd_status}[args.command]
     return run(args.db)
 
 
@@ -210,6 +227,58 @@ def cmd_changes(db: Path, days: int) -> int:
         print(f"  {sgt_text(item.change.changed_at)}  {describe_change(item)}")
     if not items:
         print("  none")
+    return 0
+
+
+# `uni-copilot notify "<text>"`: one plain-text message to your chat.
+# "-" reads the text from stdin, for long or multi-line text, e.g.
+#   Get-Content note.txt | uv run uni-copilot notify -
+# stdin is read as UTF-8 (Python on Windows would otherwise guess the old
+# Windows code page). Never prints the token or the chat id.
+def cmd_notify(text: str) -> int:
+    if text == "-":
+        sys.stdin.reconfigure(encoding="utf-8", errors="replace")
+        text = sys.stdin.read()
+    try:
+        bot = TelegramBot(load_telegram_settings())
+        sent = bot.send_message(text)
+    except (TelegramNotConfigured, TelegramError, ValueError) as e:
+        print(f"Not sent: {e}")
+        return 1
+    print(f"Sent ({sent.parts} message{'s' if sent.parts > 1 else ''}).")
+    return 0
+
+
+# `uni-copilot telegram-chat-id`: setup helper. Lists the private chats that
+# messaged the bot recently (Telegram keeps them for 24 h) with first names,
+# so you can copy your chat id into .env. Run it before the Telegram plugin is
+# set up: only one program may read the bot's messages.
+def cmd_telegram_chat_id() -> int:
+    try:
+        settings = load_telegram_settings(need_chat_id=False)
+        bot = TelegramBot(settings)
+        username = bot.get_me()
+        chats = bot.find_chat_ids()
+    except (TelegramNotConfigured, TelegramError) as e:
+        print(f"Couldn't check: {e}")
+        return 1
+
+    if not chats:
+        print(f"No messages to @{username} in the last 24 h.")
+        print(f"Open t.me/{username} in Telegram, press Start, send \"hi\", then run this again.")
+        return 1
+    print(f"Private chats that messaged @{username} recently:")
+    for chat_id, first_name in chats:
+        mark = "  (already in .env)" if chat_id == settings.chat_id else ""
+        print(f"  {chat_id}  {first_name}{mark}")
+    if settings.chat_id in {chat_id for chat_id, _ in chats}:
+        return 0
+    print(f"Add this line to {ENV_FILE.name} (in {ENV_FILE.parent}):")
+    if len(chats) == 1:
+        print(f"  TELEGRAM_CHAT_ID={chats[0][0]}")
+    else:
+        print("  TELEGRAM_CHAT_ID=<the number on the line with your first name>")
+        print("More than one person messaged the bot; only yours belongs in .env.")
     return 0
 
 

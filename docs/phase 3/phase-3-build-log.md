@@ -110,9 +110,41 @@ git add src/uni_copilot/notify docs
 git commit -m "feat(notify): add telegram sender with html fallback and token scrubbing"
 ```
 
+## Step 2: cli.py (`notify` and `telegram-chat-id`)
+
+Two new `uni-copilot` commands, both thin wrappers around step 1's `TelegramBot`:
+
+- **`uni-copilot notify "<text>"`:** loads the settings and sends one plain-text message (`send_message(text)`, no HTML). Prints `Sent (1 message).`, or `Not sent: <reason>` with exit code 1 (missing token or chat id, a Telegram error, empty text), so a script can tell. `-` instead of the text reads it from stdin (`Get-Content note.txt | uv run uni-copilot notify -`); stdin is read as UTF-8, because Python on Windows would otherwise guess the old Windows code page. `--log FILE` works with it like with `sync`.
+- **`uni-copilot telegram-chat-id`:** the setup helper. `getMe` (for the bot's name) + `find_chat_ids()`, then lists the private chats that messaged the bot recently with first names only, marks one that's `(already in .env)`, and prints the exact `TELEGRAM_CHAT_ID=...` line to add. With more than one chat it asks you to pick the line with your name. No message found → it tells you to open `t.me/<bot>`, send "hi" and run it again. Telegram keeps unread bot messages for only 24 h.
+- The module docstring lists both commands (and says `remind` and `done` come later).
+
+The first run found no messages (the earlier "hi" hadn't reached the bot); after a fresh "hi" it found your chat. You added `TELEGRAM_CHAT_ID` to `.env` yourself.
+
+Check (PowerShell):
+
+```
+uv run uni-copilot telegram-chat-id
+uv run uni-copilot notify "Hello from uni-copilot"
+uv run python -m uni_copilot.notify.telegram --send-test
+```
+
+Expect: your chat id marked `(already in .env)`; `Sent (1 message).` and "Hello from uni-copilot" on your phone; then a message with **uni-copilot test** in bold and "A title with odd characters: Made-up Lab <draft> & notes" exactly as written. **Verified 26 Oct:** both arrived, the bold worked and the escaped `<draft>` and `&` showed correctly, so Telegram's HTML mode with `escape()` works for real (no plain-text fallback needed).
+
+Caveat: piping non-English text or emoji into `notify -` from Windows PowerShell 5.1 can turn them into `?`, because PowerShell 5.1 sends piped text to programs as ASCII by default. Passing the text in quotes works. The digest doesn't use this path (it uses `send_telegram`, step 7).
+
+Commit:
+
+```
+git add src/uni_copilot/cli.py docs
+git commit -m "feat(cli): add notify and telegram-chat-id commands"
+```
+
 ## Open items
 
 Everything not yet verified in Phase 3. Updated as steps finish.
+
+- **Verified (kept for the record):** a real message with HTML formatting and escaped `<` / `&` (step 2, 26 Oct).
+- **Non-ASCII text piped into `notify -` from Windows PowerShell 5.1** may arrive as `?` (PowerShell's pipe encoding). Not tested; quoted text works.
 
 - **A real 429 or "can't parse entities" from Telegram:** handled in code, tested with a fake server in step 12; not seen live yet.
 
