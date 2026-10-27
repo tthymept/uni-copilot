@@ -180,9 +180,48 @@ git add src/uni_copilot/store tests/test_store.py docs
 git commit -m "feat(store): add notifications_sent and marked_done tables (schema v2)"
 ```
 
+## Step 4: store/reminders.py (the heart of Phase 3)
+
+Your question first: a **notification** is any message uni-copilot pushes to your phone without being asked (reminders, the sync alert, the morning digest). A **reminder** is one kind: "this deadline is due within 24 h / 2 h". `notifications_sent` holds only reminders for now; the broader name leaves room for other one-off messages about one event later (e.g. Phase 4's "opens now").
+
+**What the file does, in three parts. Nothing here sends anything; `now` is always passed in, so it runs on a made-up clock:**
+
+- **`plan_reminders(conn, now)` → `ReminderPlan`** (reminders, sync alert, the deadlines' "as of"). Reads only.
+  - **`due_reminders()`:** one SQL query for deadlines that are `open`, not removed, due in the next 24 h, and not in `marked_done` (`NOT IN (SELECT event_id FROM marked_done)`, a **subquery**). Each gets the smallest tier it fits in (`TIERS` = 2h, then 24h), and is skipped if `reminder_sent()` says that tier already went out for its current `due_at`. If the PC was off and a deadline is already within 2 h, only the 2h reminder goes.
+  - **`sync_alert()`:** per source, from `freshness()`: failing = the last attempt left an error **and** the last success is over 6 h old (or it never worked). Already alerted for this streak = `state` has `sync_alert:<source>` equal to that source's last-success time. When a sync works again, the last-success time changes, so a later failure is a new streak and alerts again. The night gap never alerts, because nothing failed.
+- **`format_message(plan, now)`:** the HTML message, or "" for an empty plan. Sync alert first, then "Due within 2 h", then "Due within 24 h" (each "not handed in on NTULearn", a hint for work handed in elsewhere), then "Deadlines as of …" in italics. One line per deadline: course code and due time in bold, title as a link to the course. Titles and error texts go through `html.escape`, and so does the link (with `quote=True`, since it sits inside `href="..."`). Every tag opens and closes on one line, so step 1's splitter can never cut one.
+- **`record_sent(conn, plan, sent_at)`:** one transaction: a `notifications_sent` row per reminder and the `sync_alert:<source>` notes. Step 5 calls it **only after** Telegram accepted the message.
+- **`time_left()`:** "in 45 min", "in 1 h 50 min", "in 23 h" (minutes only below 3 hours).
+
+Changed from the plan while building: the sync alert's "already sent" note is in `state` (decided in step 3), keyed by the last-success time, which is what makes "once per streak" work without a separate "streak ended" step.
+
+Check (PowerShell):
+
+```
+uv run python -m uni_copilot.store.reminders
+```
+
+Made-up deadlines on a made-up clock (Tue 27 Oct 12:00 SGT), each run recorded as if Telegram accepted it. Expect:
+1. the Quiz (2h) and Lab 4 (24h), not the submitted Essay, the too-far Project or the Gradescope HW you marked done; then the HTML message, with the Quiz title escaped as `&lt;draft&gt; &amp;`;
+2. and 3. nothing (already sent);
+4. at 22:10: Lab 4 (2h) and Project (24h);
+5. Lab 4 moved to Thu 12:00 → reminded again (24h) for the new time;
+6. sync alert: nothing for the night gap; an alert for all three when the last attempt failed and the last success is 20 h old; nothing on the next run; nothing when deadlines recover; a new alert when deadlines fail again 7 h later.
+
+**Verified 26–27 Oct:** all as above; 139 passed, 4 skipped. Real-store check comes with `remind --dry-run` in step 5.
+
+Commit:
+
+```
+git add src/uni_copilot/store/reminders.py docs
+git commit -m "feat(store): plan reminders and sync alerts with html message"
+```
+
 ## Open items
 
 Everything not yet verified in Phase 3. Updated as steps finish.
+
+- **How the reminder message looks on a real phone** (link titles, bold, italics, the blank lines): step 5.
 
 - **Scheduled syncs sometimes fail with "Browser failed (hidden)"** (26 Oct 12:09 and 16:17; 13:52 worked). Cause not found: no program was holding `.auth\profile` afterwards. Candidates: a Claude Code session's `ntulearn` server signing in at the same moment, or a Chromium left over for a short time. Watch `.data\sync.log`; step 4's sync alert will report streaks. The backup `.data\uni-copilot.v1-backup.sqlite` can be deleted once Phase 3 is settled.
 
@@ -211,5 +250,9 @@ Everything not yet verified in Phase 3. Updated as steps finish.
 - **`field(repr=False)`:** leaves one dataclass field out of the text Python prints for the object.
 - **Composite primary key:** a key made of several columns together (`event_id`, `reminder`, `due_at`): each combination may appear only once, but each column alone may repeat.
 - **`INSERT OR IGNORE`:** insert the row, or do nothing if one with the same key already exists.
+- **Notification vs reminder:** any message pushed to you without asking / one kind of it, about a deadline coming up.
+- **Subquery:** a `SELECT` inside another, e.g. `event_id NOT IN (SELECT event_id FROM marked_done)`.
+- **Failure streak:** failed syncs in a row since the last success. Remembered by the last-success time, so a success starts a new one.
+- **Pure planning, separate sending:** the code that decides (`plan_reminders`) never sends, so it can be tested on a made-up clock; the code that sends (step 5) does nothing clever.
 - **SQLite backup API (`conn.backup(other)`):** copies a live database safely, including writes still in the WAL file.
 - **`raise ... from None`:** raises a new error without attaching the one that caused it (here, so the URL with the token doesn't show in a traceback).
