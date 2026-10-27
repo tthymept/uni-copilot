@@ -340,11 +340,35 @@ git add src/uni_copilot/pilot_mcp tests/test_pilot.py .claude docs
 git commit -m "feat(pilot): add mark_done and send_telegram tools"
 ```
 
+## Step 9: the morning-digest skill
+
+**`.claude/skills/morning-digest/SKILL.md`**, the Claude-written half of Telegram pushes (reminders are the script half). Like `weekly-actions`: a `name` + `description` header (what Claude matches requests and the scheduled prompt against), then instructions. This is where the "skill for beautiful text" idea lives: the layout and tone rules for the digest.
+
+1. **Gather:** `whats_new(channel="telegram")`, then keep only changes worth telling: new/edited announcements and messages; new, moved, removed or renamed deadlines. Every `status_changed` is left out ("submitted" is your own action; "graded" is grade-related and never goes to Telegram), and so are deadlines you marked done, unless they moved. **Nothing left → stop: no message, no `mark_seen`** (decision 3). Then `list_events(days=2)` for open deadlines due today or tomorrow, and logistics for tests today or tomorrow from posts of that course (`get_event` on posts mentioning matric, calculator, venue, bring, ...). Pilot tools only; never live NTULearn.
+2. **Write:** plain text (it's sent with `send_telegram`), emoji section headers in a fixed order (📢 New posts, ✏️ Updated posts, 📅 Deadline changes, ⏰ Due today and tomorrow, 📝 For tests), only sections with something in them, one line per item `• <course> · <title>: <what to know or do>` (~90 characters, Claude's own summary: no greeting, no sender name, no full body), a test post's line carries its date, venue and what to bring, a post that corrects another says what it changes, at most 8 per section (`+N more: ask me on Telegram`), footer `Updated <as_of> SGT · ntulearn.ntu.edu.sg` (plus ⚠️ if a sync failed), under ~1500 characters. **Late run** (after 12:00): header says "(late, 13:20)". No grades, no links copied out of posts.
+3. **Send, then mark seen:** `send_telegram`, and only if it went through, `mark_seen(channel="telegram", up_to=checked_at)`, so a failed send is retried next run. Final output counts only (it goes to `.data\digest.log`).
+4. **Never asks questions** (07:30, nobody at the PC). **Preview:** when you ask for a preview or say not to send, it shows the digest in the chat and skips `send_telegram` and `mark_seen`.
+
+Changed from decision 10: no per-item links (the stored link is only the course page); one NTULearn link in the footer.
+
+**Preview on your real store (27 Oct, 15:22, as of 14:15):** 6 changes since the default 7-day look-back (Telegram had never looked): 4 new posts (IE0005 final quiz and LockDown Browser, CC0006 quiz moved to 16 Nov, CC0006 "ignore the earlier post"), 1 edited (IE2108 revision survey), 1 new deadline (IE2108 Online Quiz #6); nothing due today or tomorrow. The digest came out as designed, with "(late, 15:22)". The CC0006 post titled "Please ignore previous announcement" was summarised as information, not obeyed. **Fixed after the preview:** "📝 For tests" was ambiguous about tests weeks away; now it's tests today or tomorrow only, and a test post's own line carries its logistics.
+
+Check: in a Claude Code session, ask "show me a preview of the morning digest". Expect the digest in the chat, nothing sent, and your Telegram bookmark unchanged (`whats_new(channel="telegram")` shows the same changes afterwards). New skills are picked up by a new session.
+
+Commit:
+
+```
+git add .claude/skills/morning-digest docs
+git commit -m "feat(skills): add morning-digest skill"
+```
+
 ## Open items
 
 Everything not yet verified in Phase 3. Updated as steps finish.
 
-- **Decision 7 revisit:** keep "Claude asks before marking done", or let an exact "done <code>" that matches one open deadline count as the confirmation. Waiting for your answer; currently it asks.
+- **Verified (kept for the record):** a real digest send by hand (27 Oct 15:26 SGT, you said "send now"): the skill ran, `send_telegram` sent 1 message (4 new posts, 1 updated, 1 deadline change), then `mark_seen(channel="telegram", up_to=checked_at)` moved the Telegram bookmark to 15:26.
+
+- **Decision 7 revisited (27 Oct): kept.** Claude asks "Mark <course> <title> (due …) as done?" and marks only after "yes", even for an exact "done <code>" reply. Can be revisited after the test week.
 
 - **`remind` on a real deadline** (not made-up): expected Sun 1 Nov ~13:10 (IE2108 Online Quiz #6, 24h) and Mon 2 Nov ~11:10 (2h). Check `.data\remind.log` and the phone.
 - **"Reply done …" from Telegram** needs step 11 (and step 7's `mark_done`).
