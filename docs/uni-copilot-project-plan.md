@@ -361,7 +361,7 @@ Each phase ends with something usable.
 
 - Offline unit tests with **synthetic** fixtures (made-up courses, announcements, a small fake transcript JSON).
 - Parsers tested on fixture HTML: Ultra document bodies, embedded-video links, locked items.
-- Store tests: dedupe, edits, moved deadlines, removed items, reminder de-duplication. ✓ Phase 2 (except reminders, Phase 3): `tests/test_store.py`, `test_sources.py`, `test_sync.py` (failure rules with fake clients), `test_queries.py`, `test_pilot.py`.
+- Store tests: dedupe, edits, moved deadlines, removed items, reminder de-duplication. ✓ Phase 2: `tests/test_store.py`, `test_sources.py`, `test_sync.py` (failure rules with fake clients), `test_queries.py`, `test_pilot.py`. ✓ Phase 3: `test_reminders.py` (tiers, send once, moved, sync-alert streaks, message layout, `remind` / `done`), `test_telegram.py` (fake Bot API session: splitting, escaping, fallback, retries, token never in errors, "💭 Thinking…" hooks), pilot `mark_done` / `send_telegram` / `delete_telegram_message`. 176 offline tests.
 - Opt-in live smoke tests (my account, GET only) that print counts and status codes only.
 - MCP Inspector (`uv run mcp dev ...`) for manual tool checks.
 

@@ -459,6 +459,50 @@ git add scripts/start-telegram.ps1 CLAUDE.md .claude/skills/weekly-actions docs
 git commit -m "feat(telegram): start script and rules for answering from telegram"
 ```
 
+## Step 12: tests/ (offline tests for everything in Phase 3)
+
+37 new tests, all synthetic (made-up courses XX1001..., a made-up token); 176 in total, plus the 4 opt-in live ones. No test sends anything to Telegram or waits for real.
+
+**`tests/test_telegram.py`** (18): `notify/telegram.py` with a **`FakeSession`** in place of `requests.Session` (records each Bot API call, answers from a list; `sleep` is a recorder):
+
+- `.env` reading (comments, quotes, byte-order mark); environment beats `.env`; missing or malformed token / chat id fail clearly without showing the value; the settings' `repr` hides the token.
+- Splitting: under 4096, cut at line breaks, emoji count double, empty → nothing; in HTML mode a two-line `<blockquote>` box is never cut (plain mode would).
+- Escaping and `strip_html`; a plain send (chat id, no parse mode, previews off); parts one second apart.
+- HTML rejected ("can't parse entities") → resent as plain text and counted; any other 400 is an error.
+- Retries: 429 waits `retry_after`, 5xx and network errors 4 s, 8 s; gives up after 3 retries with the status.
+- **The token never appears in an error**, even when Telegram's description contains it, and a network error doesn't carry the URL (`from None`).
+- `post_note` returns the id; `delete_message`; `find_chat_ids` lists private chats once each and doesn't mark anything read; 409 → the "Telegram plugin" hint.
+- `notify/thinking.py` with a fake bot and temp files: a terminal prompt posts nothing; a Telegram prompt posts "💭 Thinking…"; a second one replaces it; the reply hook and `Stop` delete it.
+
+**`tests/test_reminders.py`** (15):
+
+- Schema: a version-1 store upgrades to 2 and keeps its events.
+- `plan_reminders` on a fixed clock: smallest tier; submitted, marked-done, removed, past and far-off deadlines skipped; send once, then the 2h one; a moved deadline reminded again; PC off during the 24 h window → only 2h.
+- Sync alert: none for the night gap or a failure under 6 h; one per streak; a new streak after a success; a source that never worked.
+- The message: your layout line by line, titles escaped, "1 deadline", "Updated" with the date for older data, the alert-only message, `time_left` / `day_and_time`.
+- `uni-copilot remind` with a faked `TelegramBot`: `--dry-run` sends and records nothing; a real run sends one HTML message and records it, the next says "Nothing to send."; a failed send records nothing and exits 1. `uni-copilot done`: several matches mark nothing, one marked, "already", reminders skip it, `--undo`, no match → exit 1.
+
+**`tests/test_pilot.py`** (+4): `mark_done` (marks, "no change", shown in `list_events` with NTULearn's status kept, undo, other kinds refused); `send_telegram` (plain text only, empty / too long refused, Telegram error → `ToolError`); `delete_telegram_message`; `.claude/telegram-session.json` has exactly the three hook events, the reply matcher names `mcp__plugin_telegram_telegram__reply`, and every hook calls `notify.thinking`.
+
+**Breaking rules on purpose** (each restored afterwards): reminders ignoring `marked_done` → caught by `test_tiers_and_filters`; the token not scrubbed → `test_token_never_in_errors`; `remind` recording after a failed send → `test_remind_failure_records_nothing`.
+
+Two test fixes while writing (the code was right): the fake session must store a copy of each payload (the bot reuses its dict for the plain resend); and the "boxes" example needs limit 45, not 40 (at 40 plain mode happens to cut between the boxes too; `telegram.py`'s self-test had the same flaw, fixed).
+
+Check:
+
+```
+uv run pytest
+```
+
+Expect `176 passed, 4 skipped`. **Verified 27 Oct.**
+
+Commit:
+
+```
+git add tests src/uni_copilot/notify/telegram.py docs
+git commit -m "test: add offline tests for telegram, reminders and pilot tools"
+```
+
 ## Open items
 
 Everything not yet verified in Phase 3. Updated as steps finish.
