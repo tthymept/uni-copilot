@@ -160,7 +160,7 @@ Every source is converted into one **event** shape:
 
 Other tables:
 - ✓ `event_changes`: what changed and when (new, edited, moved, status_changed, removed), with before/after. Powers `whats_new` and the digest.
-- `notifications_sent`: which reminder went out for which event, so nothing is sent twice. Key: event, tier (24h / 2h / sync_alert) and due time, so a moved deadline is reminded again. Written only after Telegram accepted the message. (Phase 3, schema version 2)
+- `notifications_sent`: which reminder went out for which event, so nothing is sent twice. Key: event, tier (24h / 2h) and due time, so a moved deadline is reminded again. (Sync alerts are noted in `state`, since they aren't about one event.) Written only after Telegram accepted the message. (Phase 3, schema version 2)
 - `marked_done`: items I handled outside NTULearn (Gradescope, Google Forms). Separate from `status`, so sync never overwrites it; reminders skip these. (Phase 3)
 - `calendar_links`: `event_id` ↔ Google Calendar event id. (Phase 6)
 - ✓ `state`: last sync time, last attempt, last error and notes per source; last "seen" time per channel.

@@ -10,10 +10,12 @@ In plain words:
   - This file only knows HOW things are stored. WHAT to store (new? edited?
     moved?) is decided in events.py (step 3).
 
-The three tables (see "How it all connects" in the Phase 2 build log):
-  events         one row per event, as it looks now (primary key: event_id)
-  event_changes  the diary: one row per change found, only ever added to
-  state          small key -> value notes (last sync time, last-seen bookmarks)
+The tables (see "How it all connects" in the Phase 2 and Phase 3 build logs):
+  events             one row per event, as it looks now (primary key: event_id)
+  event_changes      the diary: one row per change found, only ever added to
+  state              small key -> value notes (last sync time, last-seen bookmarks)
+  notifications_sent which reminder went out for which deadline and due time (Phase 3)
+  marked_done        deadlines you handled outside NTULearn (Phase 3); sync never touches it
 
 Schema versions: the file remembers which version of the tables it has, in
 SQLite's built-in `PRAGMA user_version` (a number, 0 for a new file).
@@ -34,12 +36,12 @@ from pathlib import Path
 from typing import Any
 
 from uni_copilot.ntulearn_mcp.config import DATA_DIR
-from uni_copilot.store.models import Change, Event
+from uni_copilot.store.models import Change, Event, Reminder
 
 DB_PATH = DATA_DIR / "uni-copilot.sqlite"
 
 # Each item upgrades the tables by one version: MIGRATIONS[0] takes a new file
-# from version 0 to 1, MIGRATIONS[1] (a later phase) from 1 to 2, and so on.
+# from version 0 to 1, MIGRATIONS[1] (Phase 3) from 1 to 2, and so on.
 MIGRATIONS: list[str] = [
     # Version 1 (Phase 2): events, event_changes, state.
     """
@@ -82,6 +84,21 @@ MIGRATIONS: list[str] = [
     CREATE TABLE state (
         key   TEXT PRIMARY KEY,      -- e.g. "last_sync:ntulearn_gradebook", "last_seen:terminal"
         value TEXT NOT NULL
+    );
+    """,
+    # Version 2 (Phase 3): notifications_sent, marked_done.
+    """
+    CREATE TABLE notifications_sent (
+        event_id TEXT NOT NULL REFERENCES events (event_id),
+        reminder TEXT NOT NULL,      -- 24h / 2h
+        due_at   TEXT NOT NULL,      -- the due time it was sent for: a moved deadline gets new rows
+        sent_at  TEXT NOT NULL,      -- written only after Telegram accepted the message
+        PRIMARY KEY (event_id, reminder, due_at)
+    );
+
+    CREATE TABLE marked_done (
+        event_id  TEXT PRIMARY KEY REFERENCES events (event_id),
+        marked_at TEXT NOT NULL      -- when you marked it; undo deletes the row
     );
     """,
 ]
@@ -219,6 +236,56 @@ def set_state(conn: sqlite3.Connection, key: str, value: str) -> None:
     )
 
 
+# ---------- reminders sent (Phase 3) ----------
+
+# True if this reminder already went out for this deadline at this due time.
+# A deadline that moved has a new due_at, so its old rows don't count.
+def reminder_sent(conn: sqlite3.Connection, event_id: str, reminder: Reminder, due_at: datetime) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM notifications_sent WHERE event_id = ? AND reminder = ? AND due_at = ?",
+        (event_id, reminder, time_to_db(due_at)),
+    ).fetchone()
+    return row is not None
+
+
+# Writes down that a reminder went out. Call it only after Telegram accepted
+# the message. Recording the same one twice is harmless (OR IGNORE keeps the
+# first row). The caller decides when to commit.
+def record_reminder(
+    conn: sqlite3.Connection, event_id: str, reminder: Reminder, due_at: datetime, sent_at: datetime
+) -> None:
+    conn.execute(
+        "INSERT OR IGNORE INTO notifications_sent (event_id, reminder, due_at, sent_at) VALUES (?, ?, ?, ?)",
+        (event_id, reminder, time_to_db(due_at), time_to_db(sent_at)),
+    )
+
+
+# ---------- marked done by you (Phase 3) ----------
+
+# Marks an event as done by you. Returns False if it was already marked (the
+# first time is kept). Raises KeyError if no such event is stored, so a typo in
+# an event id gives a clear message instead of a foreign-key error.
+# The caller decides when to commit.
+def set_marked_done(conn: sqlite3.Connection, event_id: str, when: datetime) -> bool:
+    if conn.execute("SELECT 1 FROM events WHERE event_id = ?", (event_id,)).fetchone() is None:
+        raise KeyError(event_id)
+    cursor = conn.execute(
+        "INSERT OR IGNORE INTO marked_done (event_id, marked_at) VALUES (?, ?)", (event_id, time_to_db(when))
+    )
+    return cursor.rowcount == 1
+
+
+# Undo: removes your "done" mark. Returns False if it wasn't marked.
+def clear_marked_done(conn: sqlite3.Connection, event_id: str) -> bool:
+    return conn.execute("DELETE FROM marked_done WHERE event_id = ?", (event_id,)).rowcount == 1
+
+
+# Every event you marked done, with when you marked it.
+def marked_done_times(conn: sqlite3.Connection) -> dict[str, datetime]:
+    rows = conn.execute("SELECT event_id, marked_at FROM marked_done")
+    return {r["event_id"]: time_from_db(r["marked_at"]) for r in rows}
+
+
 # Self-test: uv run python -m uni_copilot.store.db          (in memory, nothing saved)
 #            uv run python -m uni_copilot.store.db --real   (creates/opens .data/uni-copilot.sqlite)
 def _main() -> None:
@@ -289,7 +356,38 @@ def _main() -> None:
         print("   NOT refused")
     except sqlite3.IntegrityError as e:
         print(f"   refused: {e}")
+
+    print("\n6) Reminders sent (Phase 3):")
+    due = event.due_at
+    print(f"   24h sent before recording? {reminder_sent(conn, event.event_id, '24h', due)}")
+    record_reminder(conn, event.event_id, "24h", due, now)
+    record_reminder(conn, event.event_id, "24h", due, now)  # twice: still one row
+    rows = conn.execute("SELECT COUNT(*) FROM notifications_sent").fetchone()[0]
+    print(f"   after recording it twice: sent? {reminder_sent(conn, event.event_id, '24h', due)}, rows {rows}")
+    moved = datetime(2026, 11, 9, 15, 59, tzinfo=timezone.utc)
+    print(f"   same deadline moved to a new due time: sent? {reminder_sent(conn, event.event_id, '24h', moved)}")
+
+    print("\n7) Marked done by you (Phase 3):")
+    print(f"   first mark: {set_marked_done(conn, event.event_id, now)}, again: {set_marked_done(conn, event.event_id, now)}")
+    print(f"   marked: {list(marked_done_times(conn))}")
+    print(f"   undo: {clear_marked_done(conn, event.event_id)}, undo again: {clear_marked_done(conn, event.event_id)}")
+    try:
+        set_marked_done(conn, "ntulearn_gradebook:_nope_1", now)
+    except KeyError as e:
+        print(f"   an id that isn't stored is refused: KeyError {e}")
     conn.close()
+
+    print("\n8) A Phase 2 file (version 1) upgrades to version 2 and keeps its rows:")
+    old = sqlite3.connect(":memory:")
+    old.row_factory = sqlite3.Row
+    old.executescript(f"BEGIN;\n{MIGRATIONS[0]}\nPRAGMA user_version = 1;\nCOMMIT;")
+    old.execute(f"INSERT INTO events ({', '.join(EVENT_COLUMNS)}) VALUES ({placeholders})", event_to_row(event))
+    old.commit()
+    print(f"   before: version {schema_version(old)}, tables {table_names(old)}")
+    migrate(old)
+    kept = old.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    print(f"   after:  version {schema_version(old)}, tables {table_names(old)}, events kept {kept}")
+    old.close()
 
 
 if __name__ == "__main__":

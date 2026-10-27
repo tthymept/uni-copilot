@@ -139,9 +139,52 @@ git add src/uni_copilot/cli.py docs
 git commit -m "feat(cli): add notify and telegram-chat-id commands"
 ```
 
+## Step 3: store/db.py (schema version 2)
+
+**Migration 2** appended to `MIGRATIONS` (Phase 2's system: never edit an old step, only add one at the end; `open_db()` runs whatever the file hasn't had yet, inside one transaction with the new version number):
+
+- **`notifications_sent`**: `event_id` (→ `events`), `reminder` (`24h` / `2h`), `due_at` (the due time it was sent for), `sent_at`. Primary key = all three of `event_id`, `reminder`, `due_at` together, a **composite key**: the same deadline can have a 24h row and a 2h row, and a moved deadline gets new rows because its `due_at` differs. That's how "send once" and "a moved deadline is reminded again" both come from one rule.
+- **`marked_done`**: `event_id` (primary key, → `events`), `marked_at`. Undo deletes the row. Sync never reads or writes this table, so NTULearn's `status` and your "done" sit side by side.
+- **Changed from the plan:** sync alerts are not rows here. Every row points at a real deadline (foreign key to `events`), and a sync alert isn't about one. Its "already alerted for this failure streak" note goes in `state` (step 4).
+
+**Helpers** (the caller commits, like `set_state`):
+
+- `reminder_sent(conn, event_id, reminder, due_at)` → True/False.
+- `record_reminder(conn, event_id, reminder, due_at, sent_at)`: `INSERT OR IGNORE`, so recording twice keeps the first row and doesn't fail.
+- `set_marked_done(conn, event_id, when)` → True if newly marked, False if it already was (the first time is kept); `KeyError` for an id that isn't stored, so a typo gives a clear message, not a foreign-key error.
+- `clear_marked_done(conn, event_id)` → True if a mark was removed.
+- `marked_done_times(conn)` → `{event_id: marked_at}`.
+
+**`store/models.py`:** new word list `Reminder = Literal["24h", "2h"]`, next to `Status` and `ChangeType`.
+
+**`tests/test_store.py`:** `test_schema` now expects version 2 and the five tables (it pinned version 1). The full tests for the new tables come in step 12.
+
+**Your real store** was backed up first with SQLite's own backup function (a plain file copy could miss recent writes still in the `-wal` file), to `.data\uni-copilot.v1-backup.sqlite`, then upgraded by opening it.
+
+Check (PowerShell):
+
+```
+uv run python -m uni_copilot.store.db
+uv run python -m uni_copilot.store.db --real
+uv run pytest
+```
+
+Expect from the first (in memory): version 2 with five tables; a reminder recorded twice is one row; the same deadline with a moved due time counts as not sent; mark → True, mark again → False, undo → True, undo again → False; an unknown id → `KeyError`; and "a Phase 2 file (version 1) upgrades to version 2 and keeps its rows". From the second: schema version 2, `marked_done: 0 rows`, `notifications_sent: 0 rows`, your events and diary unchanged. **Verified 26 Oct:** real store 1 → 2 with all 81 events and 82 diary lines kept; 139 passed, 4 skipped.
+
+Side finding (not caused by this step): `.data\sync.log` shows the scheduled syncs at 12:09 and 16:17 on 26 Oct failed in 0 s with `AuthError: Browser failed (hidden, Error)`, while 13:52 worked. That error means the hidden browser couldn't open `.auth\profile`, usually because another browser has it open. Nothing was using the profile when checked afterwards. See Open items.
+
+Commit:
+
+```
+git add src/uni_copilot/store tests/test_store.py docs
+git commit -m "feat(store): add notifications_sent and marked_done tables (schema v2)"
+```
+
 ## Open items
 
 Everything not yet verified in Phase 3. Updated as steps finish.
+
+- **Scheduled syncs sometimes fail with "Browser failed (hidden)"** (26 Oct 12:09 and 16:17; 13:52 worked). Cause not found: no program was holding `.auth\profile` afterwards. Candidates: a Claude Code session's `ntulearn` server signing in at the same moment, or a Chromium left over for a short time. Watch `.data\sync.log`; step 4's sync alert will report streaks. The backup `.data\uni-copilot.v1-backup.sqlite` can be deleted once Phase 3 is settled.
 
 - **Verified (kept for the record):** a real message with HTML formatting and escaped `<` / `&` (step 2, 26 Oct).
 - **Non-ASCII text piped into `notify -` from Windows PowerShell 5.1** may arrive as `?` (PowerShell's pipe encoding). Not tested; quoted text works.
@@ -166,4 +209,7 @@ Everything not yet verified in Phase 3. Updated as steps finish.
 - **Parse mode / escaping:** `parse_mode="HTML"` makes Telegram read `<b>` as bold; escaping turns other people's `<`, `&` into `&lt;`, `&amp;` so they show as written.
 - **UTF-16 units:** how Telegram counts message length: most characters are 1, emoji and some rare characters are 2.
 - **`field(repr=False)`:** leaves one dataclass field out of the text Python prints for the object.
+- **Composite primary key:** a key made of several columns together (`event_id`, `reminder`, `due_at`): each combination may appear only once, but each column alone may repeat.
+- **`INSERT OR IGNORE`:** insert the row, or do nothing if one with the same key already exists.
+- **SQLite backup API (`conn.backup(other)`):** copies a live database safely, including writes still in the WAL file.
 - **`raise ... from None`:** raises a new error without attaching the one that caused it (here, so the URL with the token doesn't show in a traceback).

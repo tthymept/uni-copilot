@@ -47,11 +47,11 @@ def test_body_and_preview():
 
 # ---------- db ----------
 
-# A new database gets version 1 and the three tables; migrating again changes nothing.
+# A new database gets version 2 and the five tables; migrating again changes nothing.
 def test_schema(db):
-    assert schema_version(db) == 1
-    assert table_names(db) == ["event_changes", "events", "state"]
-    assert migrate(db) == 1
+    assert schema_version(db) == 2
+    assert table_names(db) == ["event_changes", "events", "marked_done", "notifications_sent", "state"]
+    assert migrate(db) == 2
 
 
 # Saving and reading back gives the very same Event, down to the microsecond.

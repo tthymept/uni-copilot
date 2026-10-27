@@ -53,6 +53,10 @@ Status = Literal["open", "submitted", "graded", "done"]
 # The five things the diary can say about an event.
 ChangeType = Literal["new", "edited", "moved", "status_changed", "removed"]
 
+# The two reminders a deadline can get (Phase 3): when it comes within 24 hours
+# of being due, and within 2 hours. Saved in the notifications_sent table.
+Reminder = Literal["24h", "2h"]
+
 PREVIEW_MAX_CHARS = 280
 
 
