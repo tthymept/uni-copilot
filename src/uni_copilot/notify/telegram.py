@@ -53,6 +53,8 @@ MAX_RETRIES = 3            # for 429, 5xx and network errors, with growing waits
 PART_INTERVAL_S = 1.0      # Telegram allows about 1 message per second per chat
 
 TAG = re.compile(r"<[^>]*>")
+# An opening (<b>, <a href=...>) or closing (</b>) tag; group 1 is "/" for closing.
+TAG_EDGE = re.compile(r"<(/?)[a-zA-Z][^>]*>")
 
 
 # Raised when Telegram answers with an error we can't fix by retrying
@@ -169,13 +171,35 @@ def _fit(line: str, limit: int) -> int:
     return len(line)
 
 
+# Groups lines so that a tag spanning several lines (a <blockquote> box, an
+# <i> footer) stays in one unit: a unit ends only when every tag opened in it
+# is closed again. Used in HTML mode only; in plain text "<" is just a character.
+def _tag_units(lines: list[str]) -> list[str]:
+    units: list[str] = []
+    current: list[str] = []
+    depth = 0
+    for line in lines:
+        current.append(line)
+        for m in TAG_EDGE.finditer(line):
+            depth += -1 if m.group(1) else 1
+        if depth <= 0:
+            units.append("\n".join(current))
+            current, depth = [], 0
+    if current:
+        units.append("\n".join(current))
+    return units
+
+
 # Splits a long text into parts Telegram accepts, cutting only at line breaks,
-# so a tag that opens and closes on one line is never cut in half. A single
-# line longer than the limit (rare: our own lines are short) is cut where it
-# has to be. Whitespace-only parts are dropped (Telegram rejects empty text).
-def split_message(text: str, limit: int = MAX_MESSAGE_CHARS) -> list[str]:
+# and with html=True never inside a tag that spans lines (see _tag_units), so
+# no tag is cut in half. A single unit longer than the limit (rare: our own
+# units are short) is cut where it has to be; the plain-text fallback in
+# send_message covers that case. Whitespace-only parts are dropped (Telegram
+# rejects empty text).
+def split_message(text: str, limit: int = MAX_MESSAGE_CHARS, html: bool = False) -> list[str]:
+    lines = text.split("\n")
     pieces: list[str] = []
-    for line in text.split("\n"):
+    for line in _tag_units(lines) if html else lines:
         while telegram_length(line) > limit:
             cut = _fit(line, limit)
             pieces.append(line[:cut])
@@ -218,7 +242,7 @@ class TelegramBot:
     def send_message(self, text: str, html: bool = False) -> Sent:
         if not self._settings.chat_id:
             raise TelegramNotConfigured("TELEGRAM_CHAT_ID is missing: run `uv run uni-copilot telegram-chat-id`.")
-        parts = split_message(text)
+        parts = split_message(text, html=html)
         if not parts:
             raise ValueError("nothing to send: the message is empty")
 
@@ -357,6 +381,9 @@ def _main() -> None:
     print(f"   one 10 000-character line -> {len(split_message('y' * 10_000))} parts")
     print(f"   emoji count double: telegram_length('ok 👍') = {telegram_length('ok 👍')}")
     print(f"   empty text -> {split_message('  \n ')}")
+    boxes = "<blockquote>a\nb</blockquote>\n<blockquote>c\nd</blockquote>"
+    print(f"   two 2-line boxes, limit 40, html=True:  {split_message(boxes, 40, html=True)}")
+    print(f"   the same as plain text (cuts a box):    {split_message(boxes, 40)}")
 
     print("\n3) Escaping other people's text, and the plain-text fallback:")
     title = "Lab <draft> & notes"

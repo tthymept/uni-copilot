@@ -189,7 +189,7 @@ Your question first: a **notification** is any message uni-copilot pushes to you
 - **`plan_reminders(conn, now)` → `ReminderPlan`** (reminders, sync alert, the deadlines' "as of"). Reads only.
   - **`due_reminders()`:** one SQL query for deadlines that are `open`, not removed, due in the next 24 h, and not in `marked_done` (`NOT IN (SELECT event_id FROM marked_done)`, a **subquery**). Each gets the smallest tier it fits in (`TIERS` = 2h, then 24h), and is skipped if `reminder_sent()` says that tier already went out for its current `due_at`. If the PC was off and a deadline is already within 2 h, only the 2h reminder goes.
   - **`sync_alert()`:** per source, from `freshness()`: failing = the last attempt left an error **and** the last success is over 6 h old (or it never worked). Already alerted for this streak = `state` has `sync_alert:<source>` equal to that source's last-success time. When a sync works again, the last-success time changes, so a later failure is a new streak and alerts again. The night gap never alerts, because nothing failed.
-- **`format_message(plan, now)`:** the HTML message, or "" for an empty plan. Sync alert first, then "Due within 2 h", then "Due within 24 h" (each "not handed in on NTULearn", a hint for work handed in elsewhere), then "Deadlines as of …" in italics. One line per deadline: course code and due time in bold, title as a link to the course. Titles and error texts go through `html.escape`, and so does the link (with `quote=True`, since it sits inside `href="..."`). Every tag opens and closes on one line, so step 1's splitter can never cut one.
+- **`format_message(plan, now)`:** the HTML message, or "" for an empty plan. Titles and error texts go through `html.escape`, and so does the link (with `quote=True`, since it sits inside `href="..."`). The first version (one line per deadline, "Due within 2 h (not handed in on NTULearn)" headings) worked but looked cramped on the phone; it was redesigned in step 5 to your layout (see there).
 - **`record_sent(conn, plan, sent_at)`:** one transaction: a `notifications_sent` row per reminder and the `sync_alert:<source>` notes. Step 5 calls it **only after** Telegram accepted the message.
 - **`time_left()`:** "in 45 min", "in 1 h 50 min", "in 23 h" (minutes only below 3 hours).
 
@@ -202,7 +202,7 @@ uv run python -m uni_copilot.store.reminders
 ```
 
 Made-up deadlines on a made-up clock (Tue 27 Oct 12:00 SGT), each run recorded as if Telegram accepted it. Expect:
-1. the Quiz (2h) and Lab 4 (24h), not the submitted Essay, the too-far Project or the Gradescope HW you marked done; then the HTML message, with the Quiz title escaped as `&lt;draft&gt; &amp;`;
+1. the Quiz (2h) and Lab 4 (24h), not the submitted Essay, the too-far Project or the Gradescope HW you marked done; then the HTML message (step 5's layout), with the Quiz title escaped as `&lt;draft&gt; &amp;`;
 2. and 3. nothing (already sent);
 4. at 22:10: Lab 4 (2h) and Project (24h);
 5. Lab 4 moved to Thu 12:00 → reminded again (24h) for the new time;
@@ -217,11 +217,96 @@ git add src/uni_copilot/store/reminders.py docs
 git commit -m "feat(store): plan reminders and sync alerts with html message"
 ```
 
+## Step 5: cli.py (`remind` and `done`) + the reminder layout
+
+**`uni-copilot remind`** (`cmd_remind`): `plan_reminders` → nothing: prints "Nothing to send." (the usual case) → else `format_message` → `TelegramBot.send_message(text, html=True)` → `record_sent` **only after** Telegram accepted it. A failed send prints `Not sent (...)`, records nothing and exits 1, so the next run tries again. Output is counts and course codes only (`Sent: XX1001 (2h), XX1002 (24h) (1 message).`), because it will run into `.data\remind.log` every 30 minutes.
+
+**`uni-copilot remind --dry-run`:** prints the message with the formatting removed (`strip_html`); sends and records nothing. Use it any time to see what would go out now.
+
+**`uni-copilot done "<words or id>"`** (`cmd_done`): finds one deadline by event id, NTULearn id (`_1234_1`), or words that all appear in its course code + title (any case: `"ie2108 lab 4"`). Only upcoming, not-removed deadlines can be marked; `--undo` searches only your marked ones. Several matches → lists them with ids and marks nothing; already marked → says since when. Helpers `_deadlines()` and `_match()`.
+
+**`status`** now ends with `reminders N sent, latest …` and `marked done N by you`; **`events`** shows `done*` for deadlines you marked, with a footnote.
+
+**The reminder layout (your design, 27 Oct).** The first real send worked but looked cramped (the date wrapped, "SGT" and "(not handed in on NTULearn)" repeated). Your layout, built in `store/reminders.py`:
+
+```
+<b>2 deadlines not submitted on NTULearn</b>
+
+🔴 <b>Within 2 hours</b>
+<blockquote><b>XX1001</b> · <a href="...">Made-up Quiz &lt;draft&gt; &amp; notes</a>
+1 h 27 min left · today 15:59</blockquote>
+🟡 <b>Within 24 hours</b>
+<blockquote><b>XX1002</b> · <a href="...">Made-up Lab 4</a>
+10 h left · tomorrow 00:29</blockquote>
+
+<i>Handed in somewhere else? Reply "done XX1001" to stop reminders for it.
+Updated 14:15 SGT</i>
+```
+
+- "1 deadline" for a single one; new helpers `day_and_time()` ("today 15:59", "tomorrow 00:29", else "Thu 29 Oct 15:59") and `_updated()` ("Updated 14:15 SGT", with the date when the data isn't from today, so old data shows). `time_left()` says "… left" and rounds to the hour above 3 h (9 h 59 min → "10 h left").
+- The sync alert in the same style: "⚠️ **Sync failing** since …" and a box with the sources, the error and what to do.
+- A blank line before the footer (your request after seeing it).
+- The "Reply done …" hint works once the Telegram Q&A session exists (step 11); until then, `uni-copilot done` on the PC. Under decision 7 Claude still confirms before marking; to revisit in step 7.
+
+**`notify/telegram.py`:** `<blockquote>` and `<i>` now span two lines, so in HTML mode `split_message()` groups lines into units with `_tag_units()` (a unit ends only when every tag opened in it is closed) and never cuts inside one. Plain mode is unchanged ("<" is just a character there). Self-test shows two 2-line boxes with limit 40 → two whole boxes.
+
+**Exams (your question):** a test that's an NTULearn gradebook column is reminded as "not submitted". On 27 Oct, all 4 test-like deadlines of 35 were online quizzes taken on NTULearn, where that wording is right. Real exams come with the exam timetable in Phase 7, as `kind = exam` with their own "Exam in 2 hours" reminder (noted in the plan). Meanwhile `done` silences a paper test.
+
+**Testing on a copy.** Your real store had nothing due within 24 h (correct), so the live test used a copy: a scratch script (outside the repo) copied the store with SQLite's backup function and added 3 made-up deadlines (1.5 h, 10 h, 30 h), then `uni-copilot --db <copy> remind`. `--db` is the hidden option the tests use.
+
+Check (PowerShell):
+
+```
+uv run uni-copilot status
+uv run uni-copilot remind --dry-run
+uv run uni-copilot events --days 7 --kind deadline
+```
+
+Expect: `status` ends with the `reminders` and `marked done` lines; `remind --dry-run` says "Nothing to send." unless something open is due within 24 h (then the message as plain text); `events` as before, with `done*` for anything you marked. **Verified 27 Oct** on the copy: the dry run listed XX1001 (2h) and XX1002 (24h); a real send arrived (first layout, then yours) and a second run said "Nothing to send"; `done "made-up"` listed 3 matches and marked nothing; `done "xx1003 gradescope"` marked it, again said "already marked since …", `--undo "_test3_1"` undid it. 139 passed, 4 skipped.
+
+Commit:
+
+```
+git add src/uni_copilot docs
+git commit -m "feat(cli): add remind and done commands with new reminder layout"
+```
+
+## Step 6: scripts/schedule-remind.ps1 (remind every 30 minutes)
+
+A copy of `schedule-sync.ps1` (Phase 2 step 12) for one more task, **"uni-copilot remind"**:
+
+- **runs:** `.venv\Scripts\pythonw.exe -m uni_copilot.cli --log .data\remind.log remind` (no window).
+- **when:** a daily trigger at 00:10 that repeats every 30 minutes for 23 h 31 min, so 00:10, 00:40, …, 23:40: 48 runs a day at :10 and :40. In the daytime that's 10 minutes after a sync at :00 (which takes ~1 minute). The repetition ends before the next day's 00:10 start, so days never overlap. No quiet hours (decision 4).
+- **settings:** catch up once after a missed run, run on battery, never two at once (`IgnoreNew`), stop after **5 minutes** (sync has 15; remind reads one local file and makes at most one Telegram call), optional `-Wake`. Only while you're signed in to Windows, like sync.
+- Same switches: `-DryRun`, `-RunNow`, `-Wake`, `-Remove`. `CLAUDE.md` lists it under Commands.
+- Log size: ~3 lines per run, ~8 KB a day; `--log` starts a fresh file after 1 MB (~4 months).
+
+**Your question: `telegram.py` vs the `send_telegram` tool.** `notify/telegram.py` is the phone: it already sends (the test messages and the reminder came through it). Python code (`notify`, `remind`) uses it directly. Claude can't call Python functions, only MCP tools, so step 7's `send_telegram` is a ~15-line tool in `pilot-mcp` that gives Claude a button wired to the same `telegram.py`, with Claude's limits enforced there (your chat id only, plain text, length cap). Same for `mark_done`.
+
+Check (PowerShell):
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\schedule-remind.ps1 -DryRun
+powershell -ExecutionPolicy Bypass -File scripts\schedule-remind.ps1 -RunNow
+Get-Content .data\remind.log -Tail 4
+```
+
+Expect: the dry run shows the command, "daily 00:10, every 30 min until 23:40 (48 runs a day)", time limit 5 min; then `Registered 'uni-copilot remind'. Next run: ...` and "Started one run now"; the log shows `uni-copilot remind`, `Nothing to send.`, `exit code 0` (nothing open due within 24 h). **Verified 27 Oct:** registered, the run worked from Task Scheduler. It's now live: the first real reminder should be IE2108 Online Quiz #6 (due Mon 2 Nov 13:00 SGT) around Sun 1 Nov 13:10 (24h) and Mon 2 Nov 11:10 (2h), unless submitted first.
+
+Commit:
+
+```
+git add scripts/schedule-remind.ps1 CLAUDE.md docs
+git commit -m "feat(scripts): schedule remind every 30 minutes"
+```
+
 ## Open items
 
 Everything not yet verified in Phase 3. Updated as steps finish.
 
-- **How the reminder message looks on a real phone** (link titles, bold, italics, the blank lines): step 5.
+- **`remind` on a real deadline** (not made-up): expected Sun 1 Nov ~13:10 (IE2108 Online Quiz #6, 24h) and Mon 2 Nov ~11:10 (2h). Check `.data\remind.log` and the phone.
+- **"Reply done …" from Telegram** needs step 11 (and step 7's `mark_done`).
+- **IE2108 Online Quiz #5** (due Mon 26 Oct 13:00 SGT) shows as not submitted in the store: your call whether that's right.
 
 - **Scheduled syncs sometimes fail with "Browser failed (hidden)"** (26 Oct 12:09 and 16:17; 13:52 worked). Cause not found: no program was holding `.auth\profile` afterwards. Candidates: a Claude Code session's `ntulearn` server signing in at the same moment, or a Chromium left over for a short time. Watch `.data\sync.log`; step 4's sync alert will report streaks. The backup `.data\uni-copilot.v1-backup.sqlite` can be deleted once Phase 3 is settled.
 
@@ -250,6 +335,8 @@ Everything not yet verified in Phase 3. Updated as steps finish.
 - **`field(repr=False)`:** leaves one dataclass field out of the text Python prints for the object.
 - **Composite primary key:** a key made of several columns together (`event_id`, `reminder`, `due_at`): each combination may appear only once, but each column alone may repeat.
 - **`INSERT OR IGNORE`:** insert the row, or do nothing if one with the same key already exists.
+- **`<blockquote>`:** Telegram's quote box (a coloured bar on the left); used for one box per deadline.
+- **Dry run:** do everything except the part with effects (sending, recording), and show what would have happened.
 - **Notification vs reminder:** any message pushed to you without asking / one kind of it, about a deadline coming up.
 - **Subquery:** a `SELECT` inside another, e.g. `event_id NOT IN (SELECT event_id FROM marked_done)`.
 - **Failure streak:** failed syncs in a row since the last success. Remembered by the last-success time, so a success starts a new one.

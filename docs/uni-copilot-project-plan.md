@@ -347,6 +347,7 @@ Each phase ends with something usable.
 
 **Phase 7: more sources**
 - Academic calendar, exam timetable, class timetable, forward-to-add, Outlook (if the connector works with NTU).
+- Exams get their own reminder in `remind` (noted 27 Oct): `kind = exam` with `starts_at`, worded "Exam in 2 hours: course, venue, what to bring", never "not submitted". Until then, only NTULearn gradebook items are reminded; on 27 Oct all test-like ones were online quizzes taken on NTULearn (4 of 35), where "not submitted" is right. A paper test that appears as a gradebook deadline can be silenced with `uni-copilot done`.
 
 **Phase 8: stretch**
 - Custom NTULearn watcher channel, discussions, groups, module progress, weekly review.

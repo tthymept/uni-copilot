@@ -12,8 +12,10 @@ In plain words:
   uni-copilot notify "<text>"   send a plain-text Telegram message to your chat
                        ("-" instead of the text reads it from stdin)
   uni-copilot telegram-chat-id  setup: find your chat id after you messaged the bot
-
-  Phase 3 adds `remind` and `done` later.
+  uni-copilot remind   send the deadline reminders (24 h / 2 h) and sync alert
+                       that are due now, if any; run every 30 min (step 6)
+  uni-copilot done "<words or id>"   mark a deadline done (handed in outside
+                       NTULearn) so its reminders stop; --undo takes it back
 
 How a command reaches the code (same idea as the MCP tools in Phase 1):
   pyproject.toml  [project.scripts] uni-copilot = "uni_copilot.cli:main"
@@ -23,6 +25,8 @@ How a command reaches the code (same idea as the MCP tools in Phase 1):
 
 Exit code (what Task Scheduler sees in step 12): 0 = every source worked,
 1 = at least one source failed (its old data is kept, nothing marked removed).
+For `remind`: 0 = sent or nothing to send, 1 = sending failed (nothing is
+recorded, so the next run tries again).
 
 --log FILE (step 12): everything the command prints goes to the end of FILE
 instead of the screen, starting with a time stamp line. The scheduled task
@@ -43,9 +47,23 @@ from uni_copilot.notify.telegram import (
     TelegramError,
     TelegramNotConfigured,
     load_telegram_settings,
+    strip_html,
 )
-from uni_copilot.store.db import DB_PATH, get_state, open_db, schema_version, time_from_db
+from uni_copilot.store.db import (
+    DB_PATH,
+    clear_marked_done,
+    get_state,
+    marked_done_times,
+    open_db,
+    row_to_event,
+    schema_version,
+    set_marked_done,
+    time_from_db,
+    time_to_db,
+)
+from uni_copilot.store.models import Event
 from uni_copilot.store.queries import EventChange, changes_since, first_sync_times, freshness, is_first_sync, list_events
+from uni_copilot.store.reminders import format_message, plan_reminders, record_sent
 from uni_copilot.store.sync import run_sync
 
 LOG_MAX_BYTES = 1_000_000  # ~1 MB, about two years of sync logs at 9 runs a day
@@ -75,6 +93,11 @@ def main(argv: list[str] | None = None) -> int:
     notify = commands.add_parser("notify", help="send a plain-text Telegram message to your chat")
     notify.add_argument("text", help='the message, or "-" to read it from stdin')
     commands.add_parser("telegram-chat-id", help="setup: find your chat id (send the bot a message first)")
+    remind = commands.add_parser("remind", help="send the deadline reminders and sync alert due now, if any")
+    remind.add_argument("--dry-run", action="store_true", help="show what would be sent; send and record nothing")
+    done = commands.add_parser("done", help="mark a deadline done (handed in outside NTULearn); stops its reminders")
+    done.add_argument("what", help='words from the course code and title ("IE2108 lab 4"), or the event id')
+    done.add_argument("--undo", action="store_true", help="remove your done mark again")
     parser.add_argument("--log", type=Path, help="append all output to this file instead of the screen")
     args = parser.parse_args(argv)
 
@@ -106,7 +129,11 @@ def _run(args: argparse.Namespace) -> int:
         return cmd_notify(args.text)
     if args.command == "telegram-chat-id":
         return cmd_telegram_chat_id()
-    run ={"sync": cmd_sync, "status": cmd_status}[args.command]
+    if args.command == "remind":
+        return cmd_remind(args.db, args.dry_run)
+    if args.command == "done":
+        return cmd_done(args.db, args.what, args.undo)
+    run = {"sync": cmd_sync, "status": cmd_status}[args.command]
     return run(args.db)
 
 
@@ -172,6 +199,10 @@ def cmd_status(db: Path) -> int:
     lines, latest = conn.execute("SELECT COUNT(*), MAX(changed_at) FROM event_changes").fetchone()
     latest_text = f", latest {sgt_text(time_from_db(latest))}" if latest else ""
     print(f"  diary          {lines} line(s){latest_text}")
+    sent, last_sent = conn.execute("SELECT COUNT(*), MAX(sent_at) FROM notifications_sent").fetchone()
+    last_text = f", latest {sgt_text(time_from_db(last_sent))}" if last_sent else ""
+    print(f"  reminders      {sent} sent{last_text}")
+    print(f"  marked done    {len(marked_done_times(conn))} by you")
     conn.close()
     return 0
 
@@ -185,6 +216,7 @@ def cmd_events(db: Path, days: int, kinds: list[str] | None, course: str | None)
     now = datetime.now(timezone.utc)
     print(as_of_line(conn, now))
     items = list_events(conn, days=days, kinds=kinds, course=course, now=now)
+    marked = marked_done_times(conn)
     conn.close()
 
     deadlines = [e for e in items if e.kind == "deadline"]
@@ -192,7 +224,10 @@ def cmd_events(db: Path, days: int, kinds: list[str] | None, course: str | None)
     if not kinds or "deadline" in kinds:
         print(f"Deadlines due in the next {days} day(s): {len(deadlines)}")
         for e in deadlines:
-            print(f"  {sgt_text(e.due_at)}  {e.course_code:<7} {e.status:<9}  {e.title}")
+            status = "done*" if e.event_id in marked else e.status
+            print(f"  {sgt_text(e.due_at)}  {e.course_code:<7} {status:<9}  {e.title}")
+        if any(e.event_id in marked for e in deadlines):
+            print("  * marked done by you (uni-copilot done)")
     if not kinds or set(kinds) - {"deadline"}:
         print(f"Posts from the last {days} day(s): {len(posts)}")
         for e in posts:
@@ -280,6 +315,107 @@ def cmd_telegram_chat_id() -> int:
         print("  TELEGRAM_CHAT_ID=<the number on the line with your first name>")
         print("More than one person messaged the bot; only yours belongs in .env.")
     return 0
+
+
+# `uni-copilot remind`: sends the reminders and sync alert due now as one
+# Telegram message, then records them. Records only after Telegram accepted
+# the message, so a failed send is tried again next run. Prints counts and
+# course codes only (it runs every 30 min into .data\remind.log).
+# --dry-run prints the message as plain text and sends/records nothing.
+def cmd_remind(db: Path, dry_run: bool) -> int:
+    if not db.exists():
+        print(f"No store yet ({db}). Run: uv run uni-copilot sync")
+        return 1
+    conn = open_db(db)
+    now = datetime.now(timezone.utc)
+    plan = plan_reminders(conn, now)
+    if plan.is_empty:
+        conn.close()
+        print("Nothing to send.")
+        return 0
+
+    what = ", ".join(f"{r.event.course_code} ({r.reminder})" for r in plan.reminders)
+    if plan.sync_alert:
+        what = ", ".join(filter(None, ["sync alert", what]))
+    text = format_message(plan, now)
+    if dry_run:
+        conn.close()
+        print(f"Would send: {what}. Nothing sent or recorded. The message (formatting removed):")
+        for line in strip_html(text).splitlines():
+            print(f"  | {line}")
+        return 0
+
+    try:
+        sent = TelegramBot(load_telegram_settings()).send_message(text, html=True)
+    except (TelegramNotConfigured, TelegramError) as e:
+        conn.close()
+        print(f"Not sent ({what}): {e}. Nothing recorded; the next run tries again.")
+        return 1
+    record_sent(conn, plan, datetime.now(timezone.utc))
+    conn.close()
+    fallback = f", {sent.plain_fallbacks} resent as plain text" if sent.plain_fallbacks else ""
+    print(f"Sent: {what} ({sent.parts} message{'s' if sent.parts > 1 else ''}{fallback}).")
+    return 0
+
+
+# `uni-copilot done "<words or id>"`: marks one deadline done by you, so its
+# reminders stop and lists show it as done. Finds it by event id, by NTULearn
+# id ("_1234_1"), or by words that all appear in its course code + title
+# ("ie2108 lab 4"). Only upcoming, not-removed deadlines can be marked; --undo
+# looks among the ones you marked. Several matches -> lists them, marks nothing.
+def cmd_done(db: Path, what: str, undo: bool) -> int:
+    if not db.exists():
+        print(f"No store yet ({db}). Run: uv run uni-copilot sync")
+        return 1
+    conn = open_db(db)
+    now = datetime.now(timezone.utc)
+    marked = marked_done_times(conn)
+    if undo:
+        candidates = [e for e in _deadlines(conn) if e.event_id in marked]
+    else:
+        candidates = [e for e in _deadlines(conn) if e.due_at > now and e.removed_at is None]
+    matches = _match(candidates, what)
+
+    if len(matches) != 1:
+        conn.close()
+        where = "marked-done deadlines" if undo else "upcoming deadlines"
+        if not matches:
+            print(f"No match for {what!r} among {where}. Try a course code and a word from the title.")
+        else:
+            print(f"{len(matches)} {where} match {what!r}; use more words or the id:")
+            for e in matches[:10]:
+                print(f"  {e.event_id}  {e.course_code:<7} {sgt_text(e.due_at)}  {e.title}")
+        return 1
+
+    event = matches[0]
+    label = f"{event.course_code} {event.title} (due {sgt_text(event.due_at)})"
+    with conn:
+        changed = clear_marked_done(conn, event.event_id) if undo else set_marked_done(conn, event.event_id, now)
+    conn.close()
+    if undo:
+        print(f"Undone: {label} counts as NTULearn says again ({event.status}).")
+    elif changed:
+        print(f"Marked done: {label}. No more reminders for it.")
+        print(f'Undo: uv run uni-copilot done --undo "{event.event_id}"')
+    else:
+        print(f"Already marked done since {sgt_text(marked[event.event_id])}: {label}.")
+    return 0
+
+
+# Every stored deadline (removed ones too), soonest first.
+def _deadlines(conn: sqlite3.Connection) -> list[Event]:
+    rows = conn.execute("SELECT * FROM events WHERE kind = 'deadline' ORDER BY due_at")
+    return [row_to_event(r) for r in rows]
+
+
+# The events `what` points at: an exact event id or NTULearn id if one fits,
+# else every event whose course code + title contains all the words (any case).
+def _match(events: list[Event], what: str) -> list[Event]:
+    exact = [e for e in events if what in (e.event_id, e.native_id)]
+    if exact:
+        return exact
+    words = what.lower().split()
+    return [e for e in events if words and all(w in f"{e.course_code} {e.title}".lower() for w in words)]
 
 
 # One diary line as text, e.g. "moved  DA3000  DA3 Report: Fri 07 Nov 23:59 SGT -> Sun 09 Nov 23:59 SGT".

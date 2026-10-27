@@ -23,8 +23,9 @@ In plain words:
 
 Three parts, and nothing here sends anything:
   plan_reminders  what to send now (reads the store)
-  format_message  the Telegram message (HTML: our own words and the course
-                  code / due time in bold, every title escaped first)
+  format_message  the Telegram message (HTML, your layout from 27 Oct: a
+                  summary line, then per tier a coloured dot and one
+                  <blockquote> box per deadline; every title escaped first)
   record_sent     writes down what was sent; the caller runs it only after
                   Telegram accepted the message, so a failed send is retried
                   next run instead of being lost
@@ -36,6 +37,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+from uni_copilot.ntulearn_mcp.config import SGT
 from uni_copilot.ntulearn_mcp.models import sgt_text
 from uni_copilot.store.db import get_state, record_reminder, reminder_sent, row_to_event, set_state, time_to_db
 from uni_copilot.store.models import Event, Reminder
@@ -43,7 +45,7 @@ from uni_copilot.store.queries import SOURCES, freshness
 
 # The two windows, smallest first: a deadline gets the first tier it fits in.
 TIERS: tuple[tuple[Reminder, timedelta], ...] = (("2h", timedelta(hours=2)), ("24h", timedelta(hours=24)))
-HEADINGS: dict[Reminder, str] = {"2h": "Due within 2 h", "24h": "Due within 24 h"}
+HEADINGS: dict[Reminder, str] = {"2h": "🔴 <b>Within 2 hours</b>", "24h": "🟡 <b>Within 24 hours</b>"}
 
 SYNC_ALERT_AFTER = timedelta(hours=6)
 ERROR_MAX_CHARS = 200
@@ -146,24 +148,40 @@ def sync_alert(conn: sqlite3.Connection, now: datetime) -> SyncAlert | None:
 
 
 # The Telegram message for a plan, in Telegram's HTML mode, or "" if the plan
-# is empty. Each tag opens and closes on one line, so splitting a long message
-# at line breaks never cuts one. Titles and error texts are escaped.
+# is empty. Layout (your design, 27 Oct):
+#   <b>2 deadlines not submitted on NTULearn</b>
+#
+#   🔴 <b>Within 2 hours</b>
+#   <blockquote><b>XX1001</b> · <a href="...">Quiz 1</a>
+#   1 h 27 min left · today 15:59</blockquote>
+#   🟡 <b>Within 24 hours</b>
+#   ...
+#
+#   <i>Handed in somewhere else? Reply "done XX1001" to stop reminders for it.
+#   Updated 14:15 SGT</i>
+# The sync alert, if any, comes first in the same style. Titles and error
+# texts are escaped. Some tags span two lines; send_message(html=True) never
+# splits inside an open tag.
 def format_message(plan: ReminderPlan, now: datetime) -> str:
     lines: list[str] = []
     if plan.sync_alert:
         lines += _alert_lines(plan.sync_alert)
-    for tier, _ in TIERS:
-        items = [r for r in plan.reminders if r.reminder == tier]
-        if not items:
-            continue
+    if plan.reminders:
         if lines:
             lines.append("")
-        lines.append(f"<b>{HEADINGS[tier]}</b> (not handed in on NTULearn)")
-        lines += [_deadline_line(r.event, now) for r in items]
-    if not lines:
-        return ""
-    as_of = sgt_text(plan.deadlines_as_of) if plan.deadlines_as_of else "never synced"
-    lines += ["", f"<i>Deadlines as of {as_of}.</i>"]
+        count = len(plan.reminders)
+        lines += [f"<b>{count} deadline{'s' if count > 1 else ''} not submitted on NTULearn</b>", ""]
+        for tier, _ in TIERS:
+            items = [r for r in plan.reminders if r.reminder == tier]
+            if items:
+                lines.append(HEADINGS[tier])
+                lines += [_deadline_block(r.event, now) for r in items]
+        code = html.escape(plan.reminders[0].event.course_code or "", quote=False)
+        lines.append("")
+        lines.append(f'<i>Handed in somewhere else? Reply "done {code}" to stop reminders for it.')
+        lines.append(f"{_updated(plan.deadlines_as_of, now)}</i>")
+    elif lines:
+        lines += ["", f"<i>{_updated(plan.deadlines_as_of, now)}</i>"]
     return "\n".join(lines)
 
 
@@ -179,37 +197,60 @@ def record_sent(conn: sqlite3.Connection, plan: ReminderPlan, sent_at: datetime)
                 set_state(conn, f"sync_alert:{source}", streak)
 
 
-# One deadline as one line, e.g.
-#   • <b>IE2108</b> <a href="...">Lab 4</a>, due <b>Wed 29 Oct 23:59 SGT</b> (in 1 h 50 min)
+# One deadline as a two-line box:
+#   <blockquote><b>IE2108</b> · <a href="...">Lab 4</a>
+#   1 h 50 min left · today 23:59</blockquote>
 # The title is a link to the course when there is one.
-def _deadline_line(event: Event, now: datetime) -> str:
+def _deadline_block(event: Event, now: datetime) -> str:
     title = html.escape(event.title, quote=False)
     if event.url:
         title = f'<a href="{html.escape(event.url, quote=True)}">{title}</a>'
     course = html.escape(event.course_code or "", quote=False)
-    return f"• <b>{course}</b> {title}, due <b>{sgt_text(event.due_at)}</b> ({time_left(event.due_at - now)})"
+    when = f"{time_left(event.due_at - now)} · {day_and_time(event.due_at, now)}"
+    return f"<blockquote><b>{course}</b> · {title}\n{when}</blockquote>"
 
 
-# The sync alert's lines: what's failing since when, the error, what to do.
+# The sync alert: what's failing since when, then a box with the error and what to do.
 def _alert_lines(alert: SyncAlert) -> list[str]:
     names = ", ".join(SOURCE_NAMES.get(s, s) for s in alert.sources)
-    since = f"since {sgt_text(alert.failing_since)}" if alert.failing_since else "and never worked"
+    since = f"since {sgt_text(alert.failing_since)}" if alert.failing_since else "(never worked)"
     error = alert.error if len(alert.error) <= ERROR_MAX_CHARS else alert.error[: ERROR_MAX_CHARS - 3] + "..."
     return [
-        f"<b>Sync failing</b> {since} ({names})",
-        html.escape(error, quote=False),
-        "Run <code>uv run uni-copilot sync</code>, or ask Claude to run the ntulearn login tool.",
+        f"⚠️ <b>Sync failing</b> {since}",
+        f"<blockquote>{names}: {html.escape(error, quote=False)}",
+        "Run <code>uv run uni-copilot sync</code>, or ask Claude to run the ntulearn login tool.</blockquote>",
     ]
 
 
-# "in 45 min", "in 1 h 50 min", "in 23 h": how long until the deadline.
-# Minutes only matter below 3 hours.
+# "Updated 14:15 SGT" when the data is from today, else with the date
+# ("Updated Mon 26 Oct 14:15 SGT"), so old data is easy to spot.
+def _updated(as_of: datetime | None, now: datetime) -> str:
+    if as_of is None:
+        return "Never synced"
+    if as_of.astimezone(SGT).date() == now.astimezone(SGT).date():
+        return f"Updated {as_of.astimezone(SGT):%H:%M} SGT"
+    return f"Updated {sgt_text(as_of)}"
+
+
+# "today 15:59", "tomorrow 00:29", or "Thu 29 Oct 15:59", in Singapore time.
+def day_and_time(due: datetime, now: datetime) -> str:
+    due_sgt, today = due.astimezone(SGT), now.astimezone(SGT).date()
+    days = (due_sgt.date() - today).days
+    day = {0: "today", 1: "tomorrow"}.get(days, f"{due_sgt:%a %d %b}")
+    return f"{day} {due_sgt:%H:%M}"
+
+
+# "45 min left", "1 h 50 min left", "23 h left": how long until the deadline.
+# Minutes only matter below 3 hours; above that it's rounded to the nearest
+# hour (9 h 59 min -> "10 h left", not "9 h left").
 def time_left(delta: timedelta) -> str:
     minutes = max(0, int(delta.total_seconds() // 60))
     if minutes < 60:
-        return f"in {minutes} min"
+        return f"{minutes} min left"
     hours, rest = divmod(minutes, 60)
-    return f"in {hours} h {rest} min" if hours < 3 and rest else f"in {hours} h"
+    if hours < 3:
+        return f"{hours} h {rest} min left" if rest else f"{hours} h left"
+    return f"{(minutes + 30) // 60} h left"
 
 
 # Self-test: uv run python -m uni_copilot.store.reminders
