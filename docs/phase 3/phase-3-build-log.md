@@ -362,9 +362,47 @@ git add .claude/skills/morning-digest docs
 git commit -m "feat(skills): add morning-digest skill"
 ```
 
+## Step 10: scheduled digest with headless Claude Code
+
+Two files, because `claude` isn't our Python CLI and has no `--log`:
+
+**`scripts/run-digest.ps1`** (what runs at 07:30):
+
+- **Headless Claude Code:** `claude -p "<prompt>"` ("print mode") runs one request with no chat window, prints Claude's final answer and exits, on your Claude plan, from the project folder, so `.mcp.json` (pilot) and `.claude/settings.json` apply. Nobody can click "allow", so a tool that isn't allowed is refused.
+- **Prompt:** "Scheduled morning digest: nobody is at the PC. Use the morning-digest skill ... send the digest only if something changed. Never ask questions. End with the skill's one-line result."
+- **`--allowedTools`:** `Skill` + the 5 pilot tools the skill uses. **`--disallowedTools`:** `Bash`, `PowerShell`, `Edit`, `Write`, `NotebookEdit`, `WebFetch`, `WebSearch`, `mcp__ntulearn__login`. A deny beats any allow (also your `settings.local.json`): an unattended run that reads untrusted posts gets exactly what it needs.
+- Clears `ANTHROPIC_API_KEY` for the run (not set on your PC; if it were, `claude` would bill the paid API instead of your plan).
+- Appends `=== <time> SGT  morning digest (claude -p)`, Claude's output (counts only, per the skill) and `=== exit code N` to `.data\digest.log`; fresh file after 1 MB. Reads `claude`'s output as UTF-8.
+- `-Claude <path>` (the schedule passes the full path to `claude.cmd`), optional `-Model sonnet`.
+- `$claudeArgs`, not `$args`: `$args` is PowerShell's own automatic variable for a script's arguments.
+
+**`scripts/schedule-digest.ps1`:** the third scheduler script, same switches (`-DryRun`, `-RunNow`, `-Wake`, `-Remove`, plus `-Model`). Registers **"uni-copilot digest"**: daily 07:30 (after the 07:00 sync), `powershell.exe -WindowStyle Hidden -File scripts\run-digest.ps1 -Claude "<full path to claude.cmd>"`. The path is looked up at registration because a scheduled task may not see your terminal's PATH (`claude` is an npm install: `claude.cmd` / `claude.ps1` in `%APPDATA%\npm`). Catch-up after a missed run (the skill then says "(late, HH:MM)"), battery OK, never two at once, 10-minute limit.
+
+`CLAUDE.md` lists both under Commands.
+
+Check (PowerShell):
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\run-digest.ps1
+powershell -ExecutionPolicy Bypass -File scripts\schedule-digest.ps1 -RunNow
+Get-Content .data\digest.log -Tail 6
+```
+
+Expect: each run adds a block ending in either `Digest sent: ...` or `Nothing new since <time>; no digest sent.`, then `exit code 0`. **Verified 27 Oct:** by hand at 15:32 → "Nothing new since Tue 27 Oct 15:26 SGT; no digest sent.", exit 0 (headless Claude started, loaded the skill and the pilot tools, stopped without sending); then registered with `-RunNow` and run from Task Scheduler: same result, works. First real scheduled run: Wed 28 Oct 07:30.
+
+Commit:
+
+```
+git add scripts/run-digest.ps1 scripts/schedule-digest.ps1 CLAUDE.md docs
+git commit -m "feat(scripts): schedule the morning digest with headless claude"
+```
+
 ## Open items
 
 Everything not yet verified in Phase 3. Updated as steps finish.
+
+- **First scheduled digest:** Wed 28 Oct 07:30. Check `.data\digest.log` (sent, or "Nothing new") and the phone.
+- **Hidden window:** `-WindowStyle Hidden` can flash a PowerShell window for a moment. Fully invisible is possible (e.g. a tiny launcher) if it bothers you.
 
 - **Verified (kept for the record):** a real digest send by hand (27 Oct 15:26 SGT, you said "send now"): the skill ran, `send_telegram` sent 1 message (4 new posts, 1 updated, 1 deadline change), then `mark_seen(channel="telegram", up_to=checked_at)` moved the Telegram bookmark to 15:26.
 
@@ -385,7 +423,7 @@ Everything not yet verified in Phase 3. Updated as steps finish.
 - **Giving the plugin the token without typing it into a chat** (step 11).
 - **Permission prompts from Telegram** (step 11): does a prompt reach the phone?
 - **Claude picks pilot and `weekly-actions` from Telegram** (steps 11, 13).
-- **Headless `claude -p` from Task Scheduler** (step 10).
+- **Verified (kept for the record):** headless `claude -p` from Task Scheduler (step 10, 27 Oct).
 - **Telegram's HTML mode with real titles** (steps 1, 4, 13): does the plain-text fallback ever fire?
 - **Digest after sleep** (steps 10, 13).
 
@@ -403,6 +441,9 @@ Everything not yet verified in Phase 3. Updated as steps finish.
 - **`INSERT OR IGNORE`:** insert the row, or do nothing if one with the same key already exists.
 - **`<blockquote>`:** Telegram's quote box (a coloured bar on the left); used for one box per deadline.
 - **Dry run:** do everything except the part with effects (sending, recording), and show what would have happened.
+- **Print mode / headless (`claude -p`):** Claude Code running one request without a chat window, then exiting; for scheduled jobs.
+- **`--allowedTools` / `--disallowedTools`:** per-run allow and deny lists; a deny always wins.
+- **`$args`:** PowerShell's automatic variable holding a script's own arguments; don't reuse the name.
 - **Notification vs reminder:** any message pushed to you without asking / one kind of it, about a deadline coming up.
 - **Subquery:** a `SELECT` inside another, e.g. `event_id NOT IN (SELECT event_id FROM marked_done)`.
 - **Failure streak:** failed syncs in a row since the last success. Remembered by the last-success time, so a success starts a new one.

@@ -19,6 +19,7 @@ The full plan, architecture, roadmap and verified API facts are in `docs/uni-cop
 - Telegram sender self-test: `uv run python -m uni_copilot.notify.telegram` (offline), `--check` (getMe), `--send-test` (one real message). Token and chat id live in `.env`; never print them.
 - Scheduled sync (every 2 h, 07:00–23:00): `powershell -ExecutionPolicy Bypass -File scripts\schedule-sync.ps1 [-DryRun | -RunNow | -Wake | -Remove]`; output in `.data\sync.log`
 - Scheduled reminders (every 30 min at :10/:40, all day): `powershell -ExecutionPolicy Bypass -File scripts\schedule-remind.ps1 [-DryRun | -RunNow | -Wake | -Remove]`; output in `.data\remind.log`
+- Scheduled morning digest (daily 07:30, headless `claude -p` + `morning-digest` skill): `powershell -ExecutionPolicy Bypass -File scripts\schedule-digest.ps1 [-DryRun | -RunNow | -Wake | -Remove | -Model sonnet]`; one run by hand: `scripts\run-digest.ps1`; output in `.data\digest.log`
 - Pilot self-test: `uv run python -m uni_copilot.pilot_mcp.server --self-test`; store self-tests: `uv run python -m uni_copilot.store.<models|db|events|queries>` (offline), `...store.sync` (live, in memory)
 - Server self-test (lists and calls tools in-process): `uv run python -m uni_copilot.ntulearn_mcp.server --self-test`
 - Module self-tests (live, GET only, counts only): `uv run python -m uni_copilot.ntulearn_mcp.client.<module>` (e.g. `deadlines`, `announcements`, `messages`), and `...auth.session`, `...parsers.html`, `...models` (offline)

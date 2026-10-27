@@ -384,7 +384,7 @@ Each phase ends with something usable.
 - What the other `x-bb-blti-link` items are (other external tools).
 - Whether other courses embed videos with transcripts.
 - Telegram channel plugin: does it support inline buttons? Can its reply tool be used from a scheduled run? (Design assumes reply-to-confirm and our own `sendMessage`, so neither is needed.) Also: does it run on Windows with Bun; can it take the token from its own `.env` instead of `/telegram:configure <token>` in a chat; does a permission prompt reach the phone? (Phase 3 step 11)
-- Headless `claude -p` from Task Scheduler: windowless, loads the project MCP servers and `.claude/settings.json`? (Phase 3 step 10)
+- ✓ Headless `claude -p` from Task Scheduler (Phase 3 step 10, 27 Oct): loads the project MCP servers, `.claude/settings.json` and skills; per-run `--allowedTools` / `--disallowedTools`; uses the Claude plan. A PowerShell window may flash briefly.
 - Outlook connector availability with NTU's Microsoft tenant.
 - Official sources and formats for the academic calendar and exam timetable.
 
