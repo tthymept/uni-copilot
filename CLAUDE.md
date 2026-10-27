@@ -15,9 +15,10 @@ The full plan, architecture, roadmap and verified API facts are in `docs/uni-cop
 - Install: `uv sync`, then `uv run playwright install chromium`
 - Run servers: `uv run ntulearn-mcp`, `uv run pilot-mcp`
 - Inspect tools: `uv run mcp dev src/uni_copilot/ntulearn_mcp/server.py`
-- CLI: `uv run uni-copilot sync | status | events | changes | notify "<text>" | telegram-chat-id` (Phase 3 adds `remind`, `done` later); `--log FILE` before the command appends output to a file
+- CLI: `uv run uni-copilot sync | status | events | changes | notify "<text>" | telegram-chat-id | remind [--dry-run] | done "<words or id>" [--undo]`; `--log FILE` before the command appends output to a file
 - Telegram sender self-test: `uv run python -m uni_copilot.notify.telegram` (offline), `--check` (getMe), `--send-test` (one real message). Token and chat id live in `.env`; never print them.
 - Scheduled sync (every 2 h, 07:00–23:00): `powershell -ExecutionPolicy Bypass -File scripts\schedule-sync.ps1 [-DryRun | -RunNow | -Wake | -Remove]`; output in `.data\sync.log`
+- Scheduled reminders (every 30 min at :10/:40, all day): `powershell -ExecutionPolicy Bypass -File scripts\schedule-remind.ps1 [-DryRun | -RunNow | -Wake | -Remove]`; output in `.data\remind.log`
 - Pilot self-test: `uv run python -m uni_copilot.pilot_mcp.server --self-test`; store self-tests: `uv run python -m uni_copilot.store.<models|db|events|queries>` (offline), `...store.sync` (live, in memory)
 - Server self-test (lists and calls tools in-process): `uv run python -m uni_copilot.ntulearn_mcp.server --self-test`
 - Module self-tests (live, GET only, counts only): `uv run python -m uni_copilot.ntulearn_mcp.client.<module>` (e.g. `deadlines`, `announcements`, `messages`), and `...auth.session`, `...parsers.html`, `...models` (offline)
