@@ -20,7 +20,8 @@ from uni_copilot.store.db import open_db, set_state, time_to_db
 from uni_copilot.store.events import save_events
 from uni_copilot.store.queries import SOURCES
 
-TOOL_NAMES = {"list_events", "whats_new", "get_event", "sync_status", "mark_seen"}
+TOOL_NAMES = {"list_events", "whats_new", "get_event", "sync_status", "mark_seen", "mark_done", "send_telegram"}
+WRITES = {"mark_seen", "mark_done", "send_telegram"}
 
 
 # Runs an async MCP call from a normal test.
@@ -53,14 +54,16 @@ def store_file(tmp_path, monkeypatch):
 
 # ---------- the tools Claude sees ----------
 
-# Exactly 5 tools; all read-only except mark_seen, none reaching outside the PC.
+# Exactly 7 tools; read-only except the 3 writes, only send_telegram reaching
+# outside the PC, and nothing destructive.
 def test_tool_list():
     tools = {t.name: t for t in run(server.mcp.list_tools())}
     assert set(tools) == TOOL_NAMES
     for name, t in tools.items():
-        assert t.annotations.read_only_hint is (name != "mark_seen")
-        assert t.annotations.open_world_hint is False
-    assert tools["mark_seen"].annotations.destructive_hint is False
+        assert t.annotations.read_only_hint is (name not in WRITES)
+        assert t.annotations.open_world_hint is (name == "send_telegram")
+    for name in WRITES:
+        assert tools[name].annotations.destructive_hint is False
 
 
 # Every result carries as_of; lists give previews, not bodies.

@@ -10,7 +10,9 @@
       "mcp__pilot__whats_new",
       "mcp__pilot__get_event",
       "mcp__pilot__sync_status",
-      "mcp__pilot__mark_seen"
+      "mcp__pilot__mark_seen",
+      "mcp__pilot__mark_done",
+      "mcp__pilot__send_telegram"
     ]
   }
 }

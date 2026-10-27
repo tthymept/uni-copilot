@@ -22,6 +22,7 @@ Only use the live `ntulearn` tools if the user asks for a live check, or if pilo
 
 - Deadline with status `open` → a to-do: "Submit/Do <title>".
 - `submitted`, `graded` or `done` → not a to-do. Mention it in one "already handed in" line so the user sees it's covered.
+- `marked_done_at` set (the user marked it done, e.g. handed in on Gradescope) → not a to-do either; list it in the same line as "(done, marked by you)".
 - `open` may also mean the work was handed in outside NTULearn (Gradescope, Google Forms). If a post says the submission is elsewhere, say so in the item.
 - From posts: anything the user must do or bring (e.g. "bring your matric card to Friday's quiz", "venue moved to LT2", "quiz postponed") → an item marked **(inferred from <course> announcement/message, <date>)**.
 - Never invent dates or requirements. If a post is unclear, quote the short phrase and mark it "check".

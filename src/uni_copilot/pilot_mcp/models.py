@@ -84,6 +84,17 @@ class EventItem(_Model):
     preview: str | None = Field(default=None, description=UNTRUSTED + " First ~280 characters of the body.")
     body: str | None = Field(default=None, description=BODY_DESCRIPTION + " None in lists: use get_event.")
     removed: bool = Field(default=False, description="True if it has disappeared from NTULearn.")
+    marked_done_at: UtcDatetime | None = Field(
+        default=None,
+        description="Set when the USER marked this deadline done (handed in outside NTULearn, e.g. Gradescope). "
+                    "Treat it as done: not a to-do, no reminders. `status` still shows what NTULearn says.",
+    )
+
+    # When the user marked it done, in Singapore time.
+    @computed_field
+    @property
+    def marked_done_sgt(self) -> str | None:
+        return sgt_text(self.marked_done_at) if self.marked_done_at else None
 
     # Due time in Singapore time.
     @computed_field
@@ -99,7 +110,8 @@ class EventItem(_Model):
 
 
 # A store Event -> the EventItem Claude sees. full=True includes the whole body.
-def event_item(e: Event, full: bool = False) -> EventItem:
+# marked_done_at: when the user marked it done (from the marked_done table), if they did.
+def event_item(e: Event, full: bool = False, marked_done_at: datetime | None = None) -> EventItem:
     return EventItem(
         event_id=e.event_id,
         kind=e.kind,
@@ -112,6 +124,7 @@ def event_item(e: Event, full: bool = False) -> EventItem:
         preview=e.preview or None,
         body=(e.body or None) if full else None,
         removed=not e.is_active,
+        marked_done_at=marked_done_at,
     )
 
 
@@ -145,7 +158,7 @@ class ChangeItem(_Model):
 
 # A diary line + its event -> the ChangeItem Claude sees. Moved times are
 # turned into SGT text; posts carry their full body (that's what's new).
-def change_item(item: EventChange) -> ChangeItem:
+def change_item(item: EventChange, marked_done_at: datetime | None = None) -> ChangeItem:
     c = item.change
     before, after = c.before, c.after
     if c.change_type == "moved":
@@ -156,7 +169,7 @@ def change_item(item: EventChange) -> ChangeItem:
         found_at=c.changed_at,
         before=before,
         after=after,
-        event=event_item(item.event, full=item.event.kind != "deadline"),
+        event=event_item(item.event, full=item.event.kind != "deadline", marked_done_at=marked_done_at),
     )
 
 
@@ -209,3 +222,26 @@ class Seen(_Model):
     @property
     def last_seen_sgt(self) -> str:
         return sgt_text(self.last_seen_at)
+
+
+# ---------- Phase 3: marked done, Telegram ----------
+
+# What mark_done did: the deadline as it is now, whether it's marked done now,
+# and whether this call changed anything (False = it already was that way).
+class DoneMark(_Model):
+    event: EventItem
+    marked_done: bool = Field(description="True if the deadline is now marked done by the user.")
+    changed: bool = Field(description="False if it was already in that state (nothing changed).")
+
+
+# What send_telegram did: how many messages it took and when.
+class TelegramSent(_Model):
+    parts: int = Field(description="Number of Telegram messages (long text is split).")
+    sent_at: UtcDatetime
+    note: str = Field(default="Sent as plain text to the user's own Telegram chat (the chat id in .env).")
+
+    # When it was sent, in Singapore time.
+    @computed_field
+    @property
+    def sent_sgt(self) -> str:
+        return sgt_text(self.sent_at)
