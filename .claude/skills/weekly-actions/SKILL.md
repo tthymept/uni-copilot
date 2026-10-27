@@ -44,6 +44,7 @@ New since you last looked: <one line each from whats_new, or "nothing new">
 
 - Each item has its course code, the due time or the post date, and the url (the course page) as its source.
 - Keep it short. On Telegram, use plain lines with no tables, and one line per item.
+- **On Telegram, items start with `•`**, not `- [ ]`, `☐` or `☑`: those box characters look like the empty box a phone shows for a missing character. Stick to common emoji for headers (📌 ⏰ 📢 📅 ✅ ⚠️).
 - If nothing is due, say so plainly and still show the "as of" line.
 
 ## 4. Afterwards

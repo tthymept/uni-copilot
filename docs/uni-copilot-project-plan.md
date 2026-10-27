@@ -372,7 +372,7 @@ Each phase ends with something usable.
 - Session: how long a session survives with no calls, or with calls 2 h apart (the sync interval). Silent sign-in, 10-min keepalive and Cloudflare were verified 24 Oct. Each sync is a new process that signs in silently from the profile anyway, so this matters less now; `.data/sync.log` over the next days will show any sign-in failures.
 - Whether the laptop wakes from sleep for a scheduled sync (`schedule-sync.ps1 -Wake`).
 - NTU's rules on automated access to NTULearn (read-only, paced, own account): not checked yet; Phase 9 policy check.
-- Whether Claude picks the `weekly-actions` skill and pilot by itself from Telegram too (verified in the terminal, Phase 2).
+- ✓ Claude picks the `weekly-actions` skill and pilot by itself from Telegram too (27 Oct, Phase 3 step 11).
 - Not yet verified endpoints: Discussions, Groups, content availability windows.
 - Whether reading `conversations` via the API marks messages as read (I had 0 unread when tested).
 - Past-due gradebook columns with no row for me: missed work, or items with nothing to submit? (2 cases on 24 Oct.)
@@ -383,7 +383,7 @@ Each phase ends with something usable.
 - Whether the grades endpoint ever shows unreleased grades.
 - What the other `x-bb-blti-link` items are (other external tools).
 - Whether other courses embed videos with transcripts.
-- Telegram channel plugin: does it support inline buttons? Can its reply tool be used from a scheduled run? (Design assumes reply-to-confirm and our own `sendMessage`, so neither is needed.) Also: does it run on Windows with Bun; can it take the token from its own `.env` instead of `/telegram:configure <token>` in a chat; does a permission prompt reach the phone? (Phase 3 step 11)
+- Telegram channel plugin: does it support inline buttons? Can its reply tool be used from a scheduled run? (Design assumes reply-to-confirm and our own `sendMessage`, so neither is needed.) ✓ 27 Oct (Phase 3 step 11): runs on Windows with Bun (the plugin's `bun install` had to succeed first); takes `TELEGRAM_BOT_TOKEN` from the environment, so `scripts/start-telegram.ps1` passes it from `.env` and `/telegram:configure` isn't needed; picks pilot and `weekly-actions` from Telegram. Permission relay isn't documented for this plugin: prompts wait at the PC.
 - ✓ Headless `claude -p` from Task Scheduler (Phase 3 step 10, 27 Oct): loads the project MCP servers, `.claude/settings.json` and skills; per-run `--allowedTools` / `--disallowedTools`; uses the Claude plan. A PowerShell window may flash briefly.
 - Outlook connector availability with NTU's Microsoft tenant.
 - Official sources and formats for the academic calendar and exam timetable.

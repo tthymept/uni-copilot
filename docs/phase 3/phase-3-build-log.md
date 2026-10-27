@@ -397,9 +397,74 @@ git add scripts/run-digest.ps1 scripts/schedule-digest.ps1 CLAUDE.md docs
 git commit -m "feat(scripts): schedule the morning digest with headless claude"
 ```
 
+## Step 11: asking from Telegram (channel plugin)
+
+**How it works:** Claude Code **channels** (research preview) let an MCP server push events into a running session. The official Telegram plugin is such a server, written for **Bun** (a JavaScript runtime): it polls your bot (`getUpdates`), passes each message from you into the session as a `<channel source="plugin:telegram:...">` event, and gives Claude `reply`, `react` and `edit_message` tools. Claude answers with `reply`; the terminal shows your message and a "sent" confirmation, the text appears in Telegram.
+
+**From the official docs (checked 27 Oct):** install with `/plugin install telegram@claude-plugins-official` (user scope); the token comes from `~/.claude/channels/telegram/.env` or the `TELEGRAM_BOT_TOKEN` environment variable, and the environment wins; start with `claude --channels plugin:telegram@claude-plugins-official`; pair by messaging the bot, then `/telegram:access pair <code>` and `/telegram:access policy allowlist`. Permission relay (approving prompts from the phone) isn't mentioned for this plugin, so a prompt waits at the PC.
+
+**`scripts/start-telegram.ps1`:** copies `TELEGRAM_BOT_TOKEN` from the project `.env` into this one session's environment (never printed or written elsewhere), so **`/telegram:configure` is skipped** and the token never goes through a chat; adds Bun's folder to PATH if missing (see below); clears `ANTHROPIC_API_KEY`; starts `claude --channels plugin:telegram@claude-plugins-official` in the project folder (so `CLAUDE.md`, pilot and the skills apply); extra options pass through (`--model sonnet`).
+
+**`CLAUDE.md`:** new "Answering from Telegram" section: reply with the plugin's `reply` tool (not `send_telegram`); plain text, no Markdown, lines starting with `•`, common emoji only; pilot first with "as of"; `whats_new` / `mark_seen` on the `telegram` bookmark; "done <course>" → find, ask, `mark_done` after "yes"; no grades, no full posts or sender names unless asked; a tool needing approval at the PC → say so instead. The start script is listed under Commands.
+
+**Getting it to start (27 Oct):** the first two sessions never answered. Diagnosis from outside the session: Telegram had 2, then 3 unread messages for the bot (`getWebhookInfo` → `pending_update_count`: nobody was polling); a `claude --channels` process was running but no Bun process; the plugin was installed and enabled, but its dependencies were missing (no `node_modules`), so its `start` script (`bun install && bun server.ts`) had never run. Causes found: Bun was installed after VS Code was opened, so terminals in that VS Code didn't have Bun on PATH (the script now adds `%USERPROFILE%\.bun\bin` itself); and `bun install` was run by hand in the plugin's folder (99 packages, OK). After that the session started the plugin, the bot answered the waiting messages with a pairing code, and pairing worked. Why the second session (with the PATH fix) still didn't start the plugin isn't known for sure.
+
+**Format fix after the first real answer:** Claude turned the weekly checklist's `- [ ]` into `☐` (U+2610), which looks like a missing-character box on the phone. `weekly-actions` and `CLAUDE.md` now say: on Telegram, items start with `•`, and only common emoji.
+
+**"Is it working or stuck?" (your request):** the plugin sends Telegram's "typing…" once on receipt (`sendChatAction`), which lasts only ~5 s. Keeping it alive would mean editing the plugin's code (overwritten on updates), so instead: (1) the plugin's own **`ackReaction`** setting, `/telegram:access set ackReaction 👀` (saved in `access.json`), puts 👀 on each message as soon as it arrives, and it stays; (2) a `CLAUDE.md` rule: if the answer needs more than a couple of quick pilot calls (weekly checklist, live `ntulearn`, several `get_event`), Claude first replies one line like "⏳ Building your week…", then the answer.
+
+**Keeping "typing…" on (your follow-up: "just a reaction, not typing").** "typing…" is the grey status under the bot's name, not a message: no chat line, no buzz. Telegram clears it after ~5 s, and the plugin sends it once. Any program with the token may send it (`sendChatAction`) without disturbing the plugin's polling, so we keep it alive ourselves:
+
+- **`notify/telegram.py`:** `send_typing()`.
+- **`notify/typing.py`** (new), the typing keeper: `start` writes a deadline 3 minutes ahead to `.data\typing.until` and, if no loop is beating (`.data\typing.beat`), launches a hidden detached `pythonw` loop; the loop sends "typing…" every 4 s until the deadline file is gone or passed (it checks right before each send); `stop` deletes the deadline. `.data\typing.log` gets one line per start/stop with the tool name (no message text). `demo` shows it for ~12 s.
+- **Claude Code hooks** (commands Claude Code itself runs at set moments) in **`.claude/telegram-session.json`**: `PreToolUse` on every tool → `typing hook` with `"async": true` (background, Claude never waits; it ignores the reply tool); `PreToolUse` on `mcp__plugin_telegram_telegram__reply` → `typing stop` (foreground, so typing stops before the answer goes out); `Stop` → `typing stop`. `"shell": "bash"`: on Windows hooks run in Git Bash. A matcher with only letters and `_` is an exact name; `.*` is a regex.
+- **Only the Telegram session loads them:** `start-telegram.ps1` passes `--settings .claude\telegram-session.json` (extra settings on top of the project's). Terminal sessions and the 07:30 digest never run these hooks, so they cost nothing there.
+- **`CLAUDE.md`:** the final `reply` is the last action in a turn (`mark_seen` before it), so "typing…" can't come back after the answer.
+- **Tested 27 Oct** by calling the hooks through Git Bash with fake hook events: start → loop beating; a second start → no second loop; the reply event ignored by the background hook; stop → deadline gone and loop ended within 5 s; ~0.6 s per hook call. (A first try used WSL's `bash`, which can't see `D:\` paths; Claude Code uses Git Bash.)
+
+**Then (your request): no 👀, and the "⏳" line removed once the answer is out.** 👀 off with `/telegram:access set ackReaction ""`. The plugin has no delete tool (only `reply`, `react`, `edit_message`), but its `reply` returns "sent (id: N)" and a bot may delete its own messages in a private chat (within 48 h), so:
+
+- **`notify/telegram.py`:** `delete_message(message_id)` (Bot API `deleteMessage`, your chat only).
+- **`pilot_mcp/server.py`:** new tool **`delete_telegram_message(message_id)`**, labelled `destructive_hint=True` (a deleted message is gone) and `open_world_hint=True`; Telegram itself refuses anything but the bot's own messages in your chat. Instructions: only for your own "⏳ ..." heads-up, right before the final answer. Pre-allowed in `.claude/settings.json`; `tests/test_pilot.py` expects 8 tools, two open-world, only this one destructive.
+- **`CLAUDE.md`:** heads-up flow: `reply` "⏳ ..." and note its id → work ("typing…" stays on) → `delete_telegram_message(N)` → final `reply`, the last action.
+- **Tested 27 Oct:** a test line sent to your chat (id 28) and deleted 3 s later; 139 passed, 4 skipped.
+
+**What the typing keeper showed, and what replaced it (27 Oct).** With the breakaway fix the loop ran (`loop: started`, `5 sent, 0 failed`), and a **`UserPromptSubmit` hook does fire for Telegram channel messages** (`start (UserPromptSubmit)` at 16:31:05, within a second of your message). Telegram accepted every `sendChatAction`, yet "typing…" never showed in your Telegram (Telegram Web), so you dropped it. Removed: `notify/typing.py`, `send_typing()`, the "before any tool" hook. Replacement, your design:
+
+- **`notify/thinking.py`** (new): `hook` on `UserPromptSubmit` posts **"💭 Thinking…"** at once (our code, not Claude, so no wait), only if the prompt came from the Telegram channel (contains `plugin:telegram`; typing in the session's terminal posts nothing), and saves its id in `.data\thinking.msg`; `clear` deletes it. `.data\thinking.log`: ids and reasons only. `demo` posts and deletes after 5 s.
+- **`notify/telegram.py`:** `post_note(text)` returns the sent message's id (for deleting later).
+- **`.claude/telegram-session.json`:** `UserPromptSubmit` → `thinking hook` (async); `PreToolUse` on the plugin's `reply` → `thinking clear reply` (foreground, so "💭" disappears right before Claude's first message, the "⏳" heads-up or the answer); `Stop` → `thinking hook` (deletes a leftover note).
+- **`CLAUDE.md`:** "💭 Thinking…" is automatic, Claude neither sends nor deletes it; the final `reply` is the last action (`mark_seen` and deleting "⏳" before it).
+- The result: "💭 Thinking…" right away → replaced by "⏳ Checking …" (slow answers) → "⏳" deleted and the answer sent.
+- **Tested 27 Oct:** `demo` posted and deleted id 47; through Git Bash, a terminal-style prompt posted nothing, a Telegram-style prompt posted id 48, `Stop` deleted it; 139 passed, 4 skipped.
+
+**Seen in the log:** `start (PowerShell)` at 16:31:30 in the Telegram session: Claude used PowerShell there (for "what have I submitted last week"). To look at if it matters.
+
+**Found in the plugin's code (`server.ts`, not tested):** it handles permission relay: a "yes <code>" / "no <code>" reply in Telegram is passed to Claude Code as an approval or denial of a pending tool prompt. The README doesn't mention it.
+
+**Starting it again later:** the plugin stays installed, and pairing + allowlist are saved in `%USERPROFILE%\.claude\channels\telegram\access.json`, so it's only the start script, no new pairing.
+
+Check:
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\start-telegram.ps1
+```
+
+Then from your phone: "what's due this week?". Expect the answer in Telegram in plain text with "as of …", lines starting with `•`. `/mcp` in the session shows the plugin's server as connected. **Verified 27 Oct:** paired; `access.json` has policy `allowlist`, 1 allowed sender, 0 pending; no token copy in the plugin's folder; "what do I need to do this week?" from the phone → the weekly-actions checklist from pilot, "as of Tue 27 Oct 14:15 SGT", matching the store.
+
+Commit:
+
+```
+git add scripts/start-telegram.ps1 CLAUDE.md .claude/skills/weekly-actions docs
+git commit -m "feat(telegram): start script and rules for answering from telegram"
+```
+
 ## Open items
 
 Everything not yet verified in Phase 3. Updated as steps finish.
+
+- **`•` instead of `☐` on Telegram:** rule added after the first answer; check the next checklist.
+- **Why the second Telegram session didn't start the plugin** (Bun on PATH by then): not known. If a fresh start ever stays silent: `/mcp` in the session, and the startup notice about channels.
 
 - **First scheduled digest:** Wed 28 Oct 07:30. Check `.data\digest.log` (sent, or "Nothing new") and the phone.
 - **Hidden window:** `-WindowStyle Hidden` can flash a PowerShell window for a moment. Fully invisible is possible (e.g. a tiny launcher) if it bothers you.
@@ -419,10 +484,11 @@ Everything not yet verified in Phase 3. Updated as steps finish.
 
 - **A real 429 or "can't parse entities" from Telegram:** handled in code, tested with a fake server in step 12; not seen live yet.
 
-- **Bun and the plugin on Windows** (step 11).
-- **Giving the plugin the token without typing it into a chat** (step 11).
-- **Permission prompts from Telegram** (step 11): does a prompt reach the phone?
-- **Claude picks pilot and `weekly-actions` from Telegram** (steps 11, 13).
+- **Verified (kept for the record):** Bun and the plugin on Windows; the token from the environment (no `/telegram:configure`); Claude picks pilot and `weekly-actions` from Telegram (step 11, 27 Oct).
+- **Permission prompts from Telegram:** not in the README, but the plugin's code handles "yes <code>" / "no <code>" replies as approvals. Not tested; until it is, assume a prompt may wait at the PC.
+- **The "⏳" heads-up disappearing** when the answer arrives, in a real Telegram session (after `ackReaction` off and a restart).
+- **Verified (kept for the record):** the `--settings` hooks load in the Telegram session; the reply tool's name is `mcp__plugin_telegram_telegram__reply`; `UserPromptSubmit` fires for channel messages (27 Oct).
+- **"💭 Thinking…" in a real Telegram session:** that the prompt the hook receives contains `plugin:telegram` (`.data\thinking.log` shows `posted` or `prompt not from Telegram`).
 - **Verified (kept for the record):** headless `claude -p` from Task Scheduler (step 10, 27 Oct).
 - **Telegram's HTML mode with real titles** (steps 1, 4, 13): does the plain-text fallback ever fire?
 - **Digest after sleep** (steps 10, 13).
@@ -440,6 +506,11 @@ Everything not yet verified in Phase 3. Updated as steps finish.
 - **Composite primary key:** a key made of several columns together (`event_id`, `reminder`, `due_at`): each combination may appear only once, but each column alone may repeat.
 - **`INSERT OR IGNORE`:** insert the row, or do nothing if one with the same key already exists.
 - **`<blockquote>`:** Telegram's quote box (a coloured bar on the left); used for one box per deadline.
+- **Hook:** a command Claude Code itself runs at a set moment (before a tool call, when Claude finishes), configured in settings; `async` hooks run in the background.
+- **`--settings <file>`:** extra settings for one session only, on top of the project's.
+- **Chat action ("typing…"):** a status under the bot's name, not a message; Telegram clears it after ~5 s (and it didn't show in your Telegram).
+- **Detached process / job object:** a program started so that it keeps running after its starter ends; a Windows job object can still end it with the starter unless it breaks away (`CREATE_BREAKAWAY_FROM_JOB`).
+- **`UserPromptSubmit` hook:** runs when a new prompt arrives in the session, including a channel message.
 - **Dry run:** do everything except the part with effects (sending, recording), and show what would have happened.
 - **Print mode / headless (`claude -p`):** Claude Code running one request without a chat window, then exiting; for scheduled jobs.
 - **`--allowedTools` / `--disallowedTools`:** per-run allow and deny lists; a deny always wins.

@@ -270,6 +270,23 @@ class TelegramBot:
         log.info("sendMessage: sent %d part(s), %d as plain text", len(parts), fallbacks)
         return Sent(parts=len(parts), plain_fallbacks=fallbacks)
 
+    # Sends one short plain-text note (e.g. "💭 Thinking…") and returns its
+    # message id, so it can be deleted again with delete_message.
+    def post_note(self, text: str) -> int:
+        if not self._settings.chat_id:
+            raise TelegramNotConfigured("TELEGRAM_CHAT_ID is missing: run `uv run uni-copilot telegram-chat-id`.")
+        sent = self._call("sendMessage", {"chat_id": self._settings.chat_id, "text": text,
+                                          "link_preview_options": {"is_disabled": True}})
+        return int(sent["message_id"])
+
+    # Deletes one of the bot's own messages from your chat (e.g. a "⏳ ..."
+    # heads-up once the answer is ready). Telegram only lets a bot delete its
+    # own messages in a private chat, and only within 48 hours.
+    def delete_message(self, message_id: int) -> None:
+        if not self._settings.chat_id:
+            raise TelegramNotConfigured("TELEGRAM_CHAT_ID is missing: run `uv run uni-copilot telegram-chat-id`.")
+        self._call("deleteMessage", {"chat_id": self._settings.chat_id, "message_id": message_id})
+
     # Asks Telegram who this bot is (`getMe`). Confirms the token works and
     # returns the bot's public username, e.g. "unicopilot_thyme_bot".
     def get_me(self) -> str:
@@ -382,8 +399,8 @@ def _main() -> None:
     print(f"   emoji count double: telegram_length('ok 👍') = {telegram_length('ok 👍')}")
     print(f"   empty text -> {split_message('  \n ')}")
     boxes = "<blockquote>a\nb</blockquote>\n<blockquote>c\nd</blockquote>"
-    print(f"   two 2-line boxes, limit 40, html=True:  {split_message(boxes, 40, html=True)}")
-    print(f"   the same as plain text (cuts a box):    {split_message(boxes, 40)}")
+    print(f"   two 2-line boxes, limit 45, html=True:  {split_message(boxes, 45, html=True)}")
+    print(f"   the same as plain text (cuts a box):    {split_message(boxes, 45)}")
 
     print("\n3) Escaping other people's text, and the plain-text fallback:")
     title = "Lab <draft> & notes"

@@ -1,0 +1,41 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "shell": "bash",
+            "command": "\"${CLAUDE_PROJECT_DIR}/.venv/Scripts/python.exe\" -m uni_copilot.notify.thinking hook",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "mcp__plugin_telegram_telegram__reply",
+        "hooks": [
+          {
+            "type": "command",
+            "shell": "bash",
+            "command": "\"${CLAUDE_PROJECT_DIR}/.venv/Scripts/python.exe\" -m uni_copilot.notify.thinking clear reply",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "shell": "bash",
+            "command": "\"${CLAUDE_PROJECT_DIR}/.venv/Scripts/python.exe\" -m uni_copilot.notify.thinking hook",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

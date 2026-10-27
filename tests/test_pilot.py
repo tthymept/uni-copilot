@@ -20,8 +20,10 @@ from uni_copilot.store.db import open_db, set_state, time_to_db
 from uni_copilot.store.events import save_events
 from uni_copilot.store.queries import SOURCES
 
-TOOL_NAMES = {"list_events", "whats_new", "get_event", "sync_status", "mark_seen", "mark_done", "send_telegram"}
-WRITES = {"mark_seen", "mark_done", "send_telegram"}
+TOOL_NAMES = {"list_events", "whats_new", "get_event", "sync_status", "mark_seen", "mark_done", "send_telegram",
+              "delete_telegram_message"}
+WRITES = {"mark_seen", "mark_done", "send_telegram", "delete_telegram_message"}
+TELEGRAM = {"send_telegram", "delete_telegram_message"}
 
 
 # Runs an async MCP call from a normal test.
@@ -54,16 +56,16 @@ def store_file(tmp_path, monkeypatch):
 
 # ---------- the tools Claude sees ----------
 
-# Exactly 7 tools; read-only except the 3 writes, only send_telegram reaching
-# outside the PC, and nothing destructive.
+# Exactly 8 tools; read-only except the 4 writes, only the 2 Telegram tools
+# reaching outside the PC, and only delete_telegram_message destructive.
 def test_tool_list():
     tools = {t.name: t for t in run(server.mcp.list_tools())}
     assert set(tools) == TOOL_NAMES
     for name, t in tools.items():
         assert t.annotations.read_only_hint is (name not in WRITES)
-        assert t.annotations.open_world_hint is (name == "send_telegram")
+        assert t.annotations.open_world_hint is (name in TELEGRAM)
     for name in WRITES:
-        assert tools[name].annotations.destructive_hint is False
+        assert tools[name].annotations.destructive_hint is (name == "delete_telegram_message")
 
 
 # Every result carries as_of; lists give previews, not bodies.
@@ -111,6 +113,82 @@ def test_sync_status(store_file):
     assert sc["as_of"]["failed_sources"] == []
 
 
+# ---------- Phase 3: mark_done, send_telegram, delete_telegram_message ----------
+
+# mark_done: only deadlines; marks, says when nothing changed, shows in
+# list_events, and undo takes it back. Other kinds and unknown ids are refused.
+def test_mark_done(store_file):
+    lab = "ntulearn_gradebook:_1_1"
+    sc = run(server.mcp.call_tool("mark_done", {"event_id": lab})).structured_content
+    assert sc["marked_done"] is True and sc["changed"] is True and sc["event"]["marked_done_sgt"].endswith("SGT")
+    assert run(server.mcp.call_tool("mark_done", {"event_id": lab})).structured_content["changed"] is False
+
+    events = run(server.mcp.call_tool("list_events", {"days": 7, "kinds": ["deadline"]})).structured_content["events"]
+    assert [e["marked_done_at"] is not None for e in events] == [True]
+    assert events[0]["status"] == "open"  # NTULearn's word stays as it is
+
+    sc = run(server.mcp.call_tool("mark_done", {"event_id": lab, "undo": True})).structured_content
+    assert sc["marked_done"] is False and sc["changed"] is True and sc["event"]["marked_done_at"] is None
+    for bad in ("ntulearn_announcement:_2_1", "nope"):
+        with pytest.raises(ToolError):
+            run(server.mcp.call_tool("mark_done", {"event_id": bad}))
+
+
+# Replaces the server's TelegramBot with a fake that records calls (or raises).
+@pytest.fixture
+def fake_bot(monkeypatch):
+    from uni_copilot.notify.telegram import Sent, TelegramError, TelegramSettings
+
+    calls: list[tuple] = []
+    fail: list[Exception] = []
+
+    class FakeBot:
+        def __init__(self, settings):
+            pass
+
+        # Like TelegramBot.send_message.
+        def send_message(self, text: str, html: bool = False) -> Sent:
+            if fail:
+                raise fail[0]
+            calls.append(("send", text, html))
+            return Sent(parts=1, plain_fallbacks=0)
+
+        # Like TelegramBot.delete_message.
+        def delete_message(self, message_id: int) -> None:
+            if fail:
+                raise fail[0]
+            calls.append(("delete", message_id))
+
+    monkeypatch.setattr(server, "TelegramBot", FakeBot)
+    monkeypatch.setattr(server, "load_telegram_settings", lambda: TelegramSettings("123456:FAKE", "42"))
+    return calls, fail, TelegramError
+
+
+# send_telegram: plain text (never HTML) to the configured chat; empty or too
+# long text is refused; a Telegram error comes back as a ToolError.
+def test_send_telegram(fake_bot):
+    calls, fail, TelegramError = fake_bot
+    sc = run(server.mcp.call_tool("send_telegram", {"text": "Hello"})).structured_content
+    assert sc["parts"] == 1 and calls == [("send", "Hello", False)]
+    for text in ("", "x" * (server.SEND_MAX_CHARS + 1)):
+        with pytest.raises(ToolError):
+            run(server.mcp.call_tool("send_telegram", {"text": text}))
+    fail.append(TelegramError("sendMessage", 502, "Bad Gateway"))
+    with pytest.raises(ToolError, match="Not sent"):
+        run(server.mcp.call_tool("send_telegram", {"text": "Hello"}))
+    assert len(calls) == 1
+
+
+# delete_telegram_message: deletes by id; Telegram's refusal comes back as a ToolError.
+def test_delete_telegram_message(fake_bot):
+    calls, fail, TelegramError = fake_bot
+    result = run(server.mcp.call_tool("delete_telegram_message", {"message_id": 28}))
+    assert calls == [("delete", 28)] and "deleted (id: 28)" in str(result.structured_content)
+    fail.append(TelegramError("deleteMessage", 400, "Bad Request: message can't be deleted"))
+    with pytest.raises(ToolError, match="Not deleted"):
+        run(server.mcp.call_tool("delete_telegram_message", {"message_id": 28}))
+
+
 # ---------- Claude Code config ----------
 
 # settings.json pre-allows exactly the pilot tools; .mcp.json starts the server.
@@ -121,6 +199,17 @@ def test_pilot_config():
     assert allowed == TOOL_NAMES
     mcp_json = json.loads((PROJECT_ROOT / ".mcp.json").read_text(encoding="utf-8"))
     assert mcp_json["mcpServers"]["pilot"]["args"] == ["run", "pilot-mcp"]
+
+
+# The Telegram session's extra settings: the "💭 Thinking…" hooks, and the
+# reply-hook matcher names the plugin's reply tool exactly.
+def test_telegram_session_hooks():
+    hooks = json.loads((PROJECT_ROOT / ".claude" / "telegram-session.json").read_text(encoding="utf-8"))["hooks"]
+    assert set(hooks) == {"UserPromptSubmit", "PreToolUse", "Stop"}
+    (reply,) = hooks["PreToolUse"]
+    assert reply["matcher"] == "mcp__plugin_telegram_telegram__reply"
+    commands = [h["command"] for group in hooks.values() for g in group for h in g["hooks"]]
+    assert all("uni_copilot.notify.thinking" in c for c in commands)
 
 
 # ---------- the uni-copilot CLI (offline commands only) ----------
