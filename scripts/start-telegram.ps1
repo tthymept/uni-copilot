@@ -19,6 +19,19 @@ In plain words:
   message arrives and delete it before Claude's first message goes out
   (src\uni_copilot\notify\thinking.py). Other sessions don't load them.
 
+  Locked to study Q&A (decided 27 Oct): anyone holding your Telegram could
+  talk to this session, so it only gets what answering needs:
+    --tools Skill,ToolSearch       no built-in shell, file, web or other tools
+                                   (an allow-list: new built-in tools stay out)
+    ENABLE_CLAUDEAI_MCP_SERVERS=false, --no-chrome
+                                   no claude.ai connectors (Drive, Gmail,
+                                   Calendar, Docs) and no browser control
+    --disallowedTools mcp__ntulearn__login
+                                   no sign-in window from Telegram
+  It keeps pilot, the read-only ntulearn tools and the plugin's reply tools.
+  The hooks still run (Claude Code runs them, not Claude). Coding and anything
+  else happens in your normal Claude Code sessions, which aren't affected.
+
   Only one program may read the bot's messages: while this session runs,
   `uni-copilot telegram-chat-id` gets a 409 (sending still works: reminders,
   the digest and `uni-copilot notify` are unaffected).
@@ -55,7 +68,12 @@ if (-not (Get-Command bun -ErrorAction SilentlyContinue)) {
 # Your Claude plan, never the paid API (same rule as the digest).
 Remove-Item Env:ANTHROPIC_API_KEY -ErrorAction SilentlyContinue
 
+# The lock (see the top of this file).
+$env:ENABLE_CLAUDEAI_MCP_SERVERS = "false"
+$Lock = @("--tools", "Skill,ToolSearch", "--no-chrome", "--disallowedTools", "mcp__ntulearn__login")
+
 Set-Location $Root
 Write-Output "Starting Claude Code with the Telegram channel in $Root (token from .env, not shown)."
+Write-Output "Locked to study Q&A: no shell, files, web, connectors or login in this session."
 Write-Output "Keep this window open; messages to the bot only arrive while it runs."
-& claude --channels plugin:telegram@claude-plugins-official --settings (Join-Path $Root ".claude\telegram-session.json") @args
+& claude --channels plugin:telegram@claude-plugins-official --settings (Join-Path $Root ".claude\telegram-session.json") @Lock @args

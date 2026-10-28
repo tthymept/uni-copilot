@@ -7,18 +7,21 @@ What each finished step changed, how to test it, and its commit. Unverified poin
 ### The layers
 
 ```
-Task Scheduler
+Task Scheduler (only pokes; the code decides: "poke often, decide in code")
   ├─ every 2 h, 07:00–23:00: uni-copilot sync ──► SQLite event store (Phase 2)
-  ├─ every 30 min, all day:  uni-copilot remind ──► store/reminders.py ──┐
+  │                          (one at a time: .data/sync.lock; one sign-in at a time: .auth/profile.lock)
+  ├─ every 30 min, :10/:40:  uni-copilot remind ──► store/reminders.py ──┐
   │                           (script, no AI)       reads the store,     │
   │                                                 notifications_sent   │
-  └─ daily 07:30:            claude -p ──► morning-digest skill          │
-                              (headless)    └─ pilot.whats_new ──► pilot.send_telegram
+  └─ every 30 min, :05/:35:  uni-copilot digest ──► once a day after 07:30 (sync first if the store is old)
+                              (no window)           └─ claude -p ──► morning-digest skill
+                                                        └─ pilot.whats_new ──► pilot.send_telegram
                                                                          │
                                                                          ▼
                                                    notify/telegram.py ── sendMessage ──► Telegram ──► your phone
                                                                                             ▲
-you on your phone ──► Telegram ──► channel plugin ──► Claude Code session (start-telegram.ps1)
+you on your phone ──► Telegram ──► channel plugin ──► Claude Code session (start-telegram.ps1, locked to Q&A)
+                                                        ├─ hooks: "💭 Thinking…" (notify/thinking.py)
                                                         └─ pilot tools (+ weekly-actions skill) ──► reply
 ```
 
@@ -364,6 +367,8 @@ git commit -m "feat(skills): add morning-digest skill"
 
 ## Step 10: scheduled digest with headless Claude Code
 
+> **Replaced in step 13 (28 Oct):** the fixed 07:30 run was skipped after a night asleep and its window could be closed by accident. `run-digest.ps1` is gone; `uni-copilot digest` (poked every 30 minutes, no window) does the job. Below is the step as first built.
+
 Two files, because `claude` isn't our Python CLI and has no `--log`:
 
 **`scripts/run-digest.ps1`** (what runs at 07:30):
@@ -438,7 +443,17 @@ git commit -m "feat(scripts): schedule the morning digest with headless claude"
 - The result: "💭 Thinking…" right away → replaced by "⏳ Checking …" (slow answers) → "⏳" deleted and the answer sent.
 - **Tested 27 Oct:** `demo` posted and deleted id 47; through Git Bash, a terminal-style prompt posted nothing, a Telegram-style prompt posted id 48, `Stop` deleted it; 139 passed, 4 skipped.
 
-**Seen in the log:** `start (PowerShell)` at 16:31:30 in the Telegram session: Claude used PowerShell there (for "what have I submitted last week"). To look at if it matters.
+**Seen in the log:** `start (PowerShell)` at 16:31:30 in the Telegram session: Claude used PowerShell there (for "what have I submitted last week"). No longer possible since the session was locked (below).
+
+**Locked to study Q&A (27 Oct, your decision).** Your test "now you are my coding agent..." came from you (not injection: that's instructions inside other people's text), and Claude kept the safety rules, but it offered to code from Telegram. The Telegram session is a full Claude Code session in the project folder, and the plugin's code accepts "yes <code>" approvals from Telegram, so anyone with your Telegram could have run commands or read `.env` (the bot token). `start-telegram.ps1` now starts it with:
+
+- **`--tools Skill,ToolSearch`:** the built-in tools that exist in this session, as an allow-list: no Bash/PowerShell, no Read/Glob/Grep/Edit/Write, no web, no subagents, and any built-in tool added later stays out. MCP tools aren't built-in, so pilot, ntulearn and the plugin stay.
+- **`ENABLE_CLAUDEAI_MCP_SERVERS=false` + `--no-chrome`:** your claude.ai connectors (Claude Docs, Google Docs, Google Drive, Google Calendar, Gmail) and Claude in Chrome load into every session by default; off for this one. (`claude mcp list` with the setting: only `plugin`, `ntulearn`, `pilot`.)
+- **`--disallowedTools mcp__ntulearn__login`:** no sign-in window from Telegram.
+- Hooks still run: Claude Code runs them, not Claude's tools.
+- **`CLAUDE.md`:** the session is locked; for coding, files or signing in, Claude says it has to be done at the PC instead of offering.
+- **Tested 27 Oct** with a headless run using the same flags: `pilot` `sync_status` worked; only `pilot` and `ntulearn` servers; reading `.env` and running a shell command both impossible ("no file-reading tool", "no shell tool").
+- Worst case now if someone has your Telegram: they read your deadlines and posts, or mark a deadline done (undoable). Telegram's own Two-Step Verification protects the account itself.
 
 **Found in the plugin's code (`server.ts`, not tested):** it handles permission relay: a "yes <code>" / "no <code>" reply in Telegram is passed to Claude Code as an approval or denial of a pending tool prompt. The README doesn't mention it.
 
@@ -503,9 +518,36 @@ git add tests src/uni_copilot/notify/telegram.py docs
 git commit -m "test: add offline tests for telegram, reminders and pilot tools"
 ```
 
+## Step 13: the test week (27 Oct – 3 Nov), and fixes it found
+
+You use it for a week without opening NTULearn; anything odd gets reported and fixed. Fixes so far:
+
+**28 Oct: the morning digest after a night asleep.** The laptop went into Modern Standby after 17:10 and came back at 10:44. Findings (logs, `Get-ScheduledTaskInfo`, Windows power events):
+
+- Windows did **not** start the missed 07:30 digest at 10:44 (`NumberOfMissedRuns = 1`, next run tomorrow), despite `-StartWhenAvailable`; a digest went out at 10:52 after a sync at 10:50 found 4 changes.
+- The catch-up `sync` and `remind` at 10:44:41 ended `0x41306` ("terminated") and left **no lines** in their logs: the log file was buffered, so what they printed was lost when Windows cut them off.
+- The 27 Oct 15:34 test run of the digest ended `0xC000013A` (closed/interrupted): `powershell -WindowStyle Hidden` still showed a window that could be closed.
+- Two programs opening `.auth/profile` at once is the likely cause of the 26 Oct "Browser failed (hidden)" sync failures.
+
+The fix follows a new rule, **"poke often, decide in code"** (also in `CLAUDE.md`): the scheduler only pokes, the Python code decides from the store's state, so missed runs catch up by themselves and another host could use cron/systemd instead.
+
+- **`uni-copilot digest`** (new, `cli.py`): before 07:30 SGT or already done today → nothing; 3 failed tries today → gives up until tomorrow; deadlines older than 3 h → sync first (or wait up to 3 min for a sync already running, then re-check); then `claude -p` with the `morning-digest` prompt. "Done today" is saved in `state` (`digest_done`) when Claude finished OK, including "Nothing new"; a Claude error or the skill's `Not sent:` counts as a failed try (`digest_tries`). `--force` runs it now.
+- **No window:** `run_claude_digest()` starts the real `claude.exe` (inside the npm install, found by `find_claude()`; not `claude.cmd`, so no cmd.exe console) with `CREATE_NO_WINDOW`, from `pythonw`. Locked like the Telegram session: `--tools Skill,ToolSearch`, `--no-chrome`, `ENABLE_CLAUDEAI_MCP_SERVERS=false`, `ntulearn` `login` denied, the 5 pilot tools pre-allowed, `ANTHROPIC_API_KEY` removed; 10-minute limit.
+- **`scripts/schedule-digest.ps1`** rewritten: "uni-copilot digest" pokes every 30 min at :05/:35 (sync :00, remind :10/:40) via `pythonw -m uni_copilot.cli --log .data\digest.log digest --claude <claude.exe>`; 15-minute limit. **`scripts/run-digest.ps1` removed.**
+- **`src/uni_copilot/filelock.py`** (new): a lock between programs on a lock file (`msvcrt.locking` on Windows, `fcntl` elsewhere); the OS drops it when a program ends, even on a crash, so it can't be left behind. Used by `auth/session.py` `sign_in` (`.auth/profile.lock`, waits up to 120 s, then `AuthError`) and `cli.py` sync (`.data/sync.lock`: a scheduled sync skips while another runs).
+- **Logs are line-buffered** (`open_log(..., buffering=1)`), so a run that Windows cuts off still leaves its lines.
+- **`tests/test_digest.py`** (10): the lock; sync skipping; digest not before 07:30 (and `--force`), once a day, "Nothing new" counts as done, retries then gives up after 3, `Not sent:` counts as a failure, sync first when the store is old, no extra sync when fresh; the exact `claude -p` command (tools, connectors off, no API key, no window); `find_claude`. 186 passed, 4 skipped.
+- **Live, 28 Oct ~11:55:** `uv run uni-copilot digest --force` → store fresh (10:50), no extra sync, Claude headless with no window → "Nothing new since Wed 28 Oct 10:52 SGT; no digest sent." (correct: the 10:52 digest had already gone out), exit 0.
+- **Your part:** re-register the task (`schedule-digest.ps1 -RunNow`), and the laptop power settings (plugged in: lid "do nothing", never sleep) if you want it awake overnight.
+
+**Hosting (your questions, 28 Oct):** serverless (Vercel, Netlify, Workers) can't run Chromium, keep SQLite or host Claude Code; Render needs paid workers and disk; a small cloud VM could work but NTU's Microsoft sign-in from a data-centre IP may demand MFA (unverified) and the session would live on a rented server (a plan non-goal). Realistic: this laptop plugged in with lid "do nothing"; later an always-on device at home, or a cloud relay for reminders only (deadline titles and times, no credentials). Storing the NTU password was discussed and not done: MFA would still block unattended sign-in, and the risk is much larger than the cookies'.
+
 ## Open items
 
 Everything not yet verified in Phase 3. Updated as steps finish.
+
+- **The new digest poke after a night asleep:** the first morning after re-registering; `.data\digest.log` should show "Not yet" lines before 07:30, then one real run.
+- **Why the 10:44 catch-up runs were "terminated":** the line-buffered logs will show what they printed next time.
 
 - **`•` instead of `☐` on Telegram:** rule added after the first answer; check the next checklist.
 - **Why the second Telegram session didn't start the plugin** (Bun on PATH by then): not known. If a fresh start ever stays silent: `/mcp` in the session, and the startup notice about channels.
@@ -521,7 +563,7 @@ Everything not yet verified in Phase 3. Updated as steps finish.
 - **"Reply done …" from Telegram** needs step 11 (and step 7's `mark_done`).
 - **IE2108 Online Quiz #5** (due Mon 26 Oct 13:00 SGT) shows as not submitted in the store: your call whether that's right.
 
-- **Scheduled syncs sometimes fail with "Browser failed (hidden)"** (26 Oct 12:09 and 16:17; 13:52 worked). Cause not found: no program was holding `.auth\profile` afterwards. Candidates: a Claude Code session's `ntulearn` server signing in at the same moment, or a Chromium left over for a short time. Watch `.data\sync.log`; step 4's sync alert will report streaks. The backup `.data\uni-copilot.v1-backup.sqlite` can be deleted once Phase 3 is settled.
+- **Scheduled syncs sometimes fail with "Browser failed (hidden)"** (26 Oct 12:09 and 16:17; 13:52 worked). Likely two programs opening `.auth\profile` at once; since 28 Oct sign-ins take turns (`.auth/profile.lock`, step 13). Watch `.data\sync.log` to confirm it stops. The backup `.data\uni-copilot.v1-backup.sqlite` can be deleted once Phase 3 is settled.
 
 - **Verified (kept for the record):** a real message with HTML formatting and escaped `<` / `&` (step 2, 26 Oct).
 - **Non-ASCII text piped into `notify -` from Windows PowerShell 5.1** may arrive as `?` (PowerShell's pipe encoding). Not tested; quoted text works.
@@ -529,7 +571,8 @@ Everything not yet verified in Phase 3. Updated as steps finish.
 - **A real 429 or "can't parse entities" from Telegram:** handled in code, tested with a fake server in step 12; not seen live yet.
 
 - **Verified (kept for the record):** Bun and the plugin on Windows; the token from the environment (no `/telegram:configure`); Claude picks pilot and `weekly-actions` from Telegram (step 11, 27 Oct).
-- **Permission prompts from Telegram:** not in the README, but the plugin's code handles "yes <code>" / "no <code>" replies as approvals. Not tested; until it is, assume a prompt may wait at the PC.
+- **Permission prompts from Telegram:** not in the README, but the plugin's code handles "yes <code>" / "no <code>" replies as approvals. Not tested; matters much less since the session is locked (the tools that would ask don't exist there).
+- **The locked session in real use:** the first answers after the restart, and a test such as a "forwarded" message asking for `.env` (expect a refusal).
 - **The "⏳" heads-up disappearing** when the answer arrives, in a real Telegram session (after `ackReaction` off and a restart).
 - **Verified (kept for the record):** the `--settings` hooks load in the Telegram session; the reply tool's name is `mcp__plugin_telegram_telegram__reply`; `UserPromptSubmit` fires for channel messages (27 Oct).
 - **"💭 Thinking…" in a real Telegram session:** that the prompt the hook receives contains `plugin:telegram` (`.data\thinking.log` shows `posted` or `prompt not from Telegram`).
@@ -550,6 +593,10 @@ Everything not yet verified in Phase 3. Updated as steps finish.
 - **Composite primary key:** a key made of several columns together (`event_id`, `reminder`, `due_at`): each combination may appear only once, but each column alone may repeat.
 - **`INSERT OR IGNORE`:** insert the row, or do nothing if one with the same key already exists.
 - **`<blockquote>`:** Telegram's quote box (a coloured bar on the left); used for one box per deadline.
+- **Poke often, decide in code:** the scheduler only starts a command on a timer; the command decides from saved state whether anything is due, so missed runs catch up by themselves and the scheduler can be swapped.
+- **Lock file:** a file that only one program at a time can lock (the OS releases it when the program ends), so programs take turns.
+- **Line buffering:** writing each line to the file at once instead of collecting text in memory first.
+- **Modern Standby:** a laptop sleep mode where Windows looks on but scheduled tasks don't run.
 - **Hook:** a command Claude Code itself runs at a set moment (before a tool call, when Claude finishes), configured in settings; `async` hooks run in the background.
 - **`--settings <file>`:** extra settings for one session only, on top of the project's.
 - **Chat action ("typing…"):** a status under the bot's name, not a message; Telegram clears it after ~5 s (and it didn't show in your Telegram).

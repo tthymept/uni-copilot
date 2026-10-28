@@ -29,6 +29,7 @@ from playwright.sync_api import BrowserContext, Page, Route, sync_playwright
 from playwright.sync_api import Error as PlaywrightError
 from requests.cookies import RequestsCookieJar
 
+from uni_copilot.filelock import file_lock
 from uni_copilot.ntulearn_mcp.config import (
     BASE_URL,
     LOGIN_TIMEOUT_S,
@@ -48,7 +49,12 @@ POLL_MS = 2000
 SIGN_IN_FORM = "input[name=loginfmt], input[type=password]"
 
 # Chromium allows one process per profile folder, so only one sign-in at a time.
+# _browser_lock: threads inside this program. PROFILE_LOCK: other programs
+# (the scheduled sync, the digest's sync, ntulearn-mcp in a Claude session);
+# without it they collided ("Browser failed (hidden)", 26 Oct).
 _browser_lock = threading.Lock()
+PROFILE_LOCK = PROFILE_DIR.parent / "profile.lock"
+PROFILE_WAIT_S = 120  # a silent sign-in takes ~6 s; a window sign-in can take minutes
 
 
 class AuthError(Exception):
@@ -73,8 +79,11 @@ def sign_in(allow_window: bool = False) -> LoginResult:
     Always tries a hidden browser first. If that can't finish by itself and
     allow_window is True, opens a visible window for you to sign in.
     Raises LoginRequired if a sign-in needs you but allow_window is False.
+    Waits (up to PROFILE_WAIT_S) if another program is signing in right now.
     """
-    with _browser_lock:
+    with _browser_lock, file_lock(PROFILE_LOCK, PROFILE_WAIT_S) as got:
+        if not got:
+            raise AuthError(f"Another program has been using .auth/profile for over {PROFILE_WAIT_S} s.")
         start = time.monotonic()
         jar = _attempt(headless=True, timeout_s=SILENT_LOGIN_TIMEOUT_S)
         if jar is not None:

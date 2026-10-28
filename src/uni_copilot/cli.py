@@ -16,6 +16,9 @@ In plain words:
                        that are due now, if any; run every 30 min (step 6)
   uni-copilot done "<words or id>"   mark a deadline done (handed in outside
                        NTULearn) so its reminders stop; --undo takes it back
+  uni-copilot digest   the morning digest, run every 30 min: acts once a day
+                       after 07:30 (syncing first if the store is old), with
+                       Claude Code headless and no window; --force runs it now
 
 How a command reaches the code (same idea as the MCP tools in Phase 1):
   pyproject.toml  [project.scripts] uni-copilot = "uni_copilot.cli:main"
@@ -26,7 +29,14 @@ How a command reaches the code (same idea as the MCP tools in Phase 1):
 Exit code (what Task Scheduler sees in step 12): 0 = every source worked,
 1 = at least one source failed (its old data is kept, nothing marked removed).
 For `remind`: 0 = sent or nothing to send, 1 = sending failed (nothing is
-recorded, so the next run tries again).
+recorded, so the next run tries again). For `digest`: 0 = done, not due, or
+already done today; 1 = Claude failed (tried again at the next run, up to 3
+times a day).
+
+Scheduling rule ("poke often, decide in code", 28 Oct): Task Scheduler only
+pokes `remind` and `digest` every 30 minutes; the code decides whether
+anything is due, from what the store remembers. Missed runs (sleep, reboot)
+then don't matter, and another scheduler (cron, systemd) could poke instead.
 
 --log FILE (step 12): everything the command prints goes to the end of FILE
 instead of the screen, starting with a time stamp line. The scheduled task
@@ -35,11 +45,16 @@ runs with pythonw.exe (no window), which has no screen to print to.
 
 import argparse
 import logging
+import os
+import shutil
+import subprocess
 import sys
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time as day_time, timedelta, timezone
 from pathlib import Path
 
+from uni_copilot.filelock import file_lock
+from uni_copilot.ntulearn_mcp.config import DATA_DIR, PROJECT_ROOT, SGT
 from uni_copilot.ntulearn_mcp.models import sgt_text
 from uni_copilot.notify.telegram import (
     ENV_FILE,
@@ -58,6 +73,7 @@ from uni_copilot.store.db import (
     row_to_event,
     schema_version,
     set_marked_done,
+    set_state,
     time_from_db,
     time_to_db,
 )
@@ -67,6 +83,23 @@ from uni_copilot.store.reminders import format_message, plan_reminders, record_s
 from uni_copilot.store.sync import run_sync
 
 LOG_MAX_BYTES = 1_000_000  # ~1 MB, about two years of sync logs at 9 runs a day
+
+# One sync at a time across programs (scheduled sync, the digest's sync).
+SYNC_LOCK = DATA_DIR / "sync.lock"
+
+# The digest (28 Oct): once a day, after 07:30 SGT; sync first if the
+# deadlines are older than 3 hours (the PC was asleep); at most 3 tries a day.
+DIGEST_AFTER = day_time(7, 30)
+DIGEST_STALE = timedelta(hours=3)
+DIGEST_MAX_TRIES = 3
+DIGEST_TIMEOUT_S = 600
+DIGEST_PROMPT = ("Scheduled morning digest: nobody is at the PC. Use the morning-digest skill: check what's new "
+                 "on the telegram channel and send the digest only if something changed. Never ask questions. "
+                 "End with the skill's one-line result.")
+# Locked like the Telegram session: built-in tools Skill and ToolSearch only,
+# no connectors or Chrome, no NTULearn login; the 5 pilot tools pre-allowed.
+DIGEST_ALLOWED = ["mcp__pilot__whats_new", "mcp__pilot__list_events", "mcp__pilot__get_event",
+                  "mcp__pilot__send_telegram", "mcp__pilot__mark_seen"]
 
 # Friendly names for the sources, in the order they're shown.
 SOURCE_LABELS = {
@@ -98,6 +131,9 @@ def main(argv: list[str] | None = None) -> int:
     done = commands.add_parser("done", help="mark a deadline done (handed in outside NTULearn); stops its reminders")
     done.add_argument("what", help='words from the course code and title ("IE2108 lab 4"), or the event id')
     done.add_argument("--undo", action="store_true", help="remove your done mark again")
+    digest = commands.add_parser("digest", help="the morning digest (once a day after 07:30; run every 30 min)")
+    digest.add_argument("--force", action="store_true", help="run it now, even before 07:30 or if done today")
+    digest.add_argument("--claude", help="full path to claude.exe (default: found next to the npm install)")
     parser.add_argument("--log", type=Path, help="append all output to this file instead of the screen")
     args = parser.parse_args(argv)
 
@@ -133,21 +169,35 @@ def _run(args: argparse.Namespace) -> int:
         return cmd_remind(args.db, args.dry_run)
     if args.command == "done":
         return cmd_done(args.db, args.what, args.undo)
+    if args.command == "digest":
+        return cmd_digest(args.db, args.force, args.claude)
     run = {"sync": cmd_sync, "status": cmd_status}[args.command]
     return run(args.db)
 
 
 # Opens the log file for adding to its end. If it's grown past 1 MB, the old
 # one is kept as <name>.old (replacing any older one) and a new file starts.
+# Line-buffered (buffering=1): each line is written at once, so a run that
+# Windows cuts off still leaves its lines (on 28 Oct two runs left nothing).
 def open_log(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists() and path.stat().st_size > LOG_MAX_BYTES:
         path.replace(path.with_name(path.name + ".old"))
-    return open(path, "a", encoding="utf-8")
+    return open(path, "a", encoding="utf-8", buffering=1)
 
 
-# `uni-copilot sync`: one full sync into the store, one line per source.
+# `uni-copilot sync`: one sync, unless another program is syncing right now
+# (then this one skips: that sync brings the same fresh data).
 def cmd_sync(db: Path) -> int:
+    with file_lock(SYNC_LOCK) as got:
+        if not got:
+            print("Another sync is running; skipped this one.")
+            return 0
+        return _sync(db)
+
+
+# One full sync into the store, one line per source (call with SYNC_LOCK held).
+def _sync(db: Path) -> int:
     conn = open_db(db)
     print("Syncing NTULearn (GET only, about 1 minute)...")
     started = datetime.now(timezone.utc)  # the sync's time stamp = the "as of" time saved in state
@@ -400,6 +450,108 @@ def cmd_done(db: Path, what: str, undo: bool) -> int:
     else:
         print(f"Already marked done since {sgt_text(marked[event.event_id])}: {label}.")
     return 0
+
+
+# `uni-copilot digest`: poked every 30 minutes; decides for itself.
+#   - before 07:30 SGT, or already done today -> nothing (unless --force);
+#   - 3 failed tries today -> gives up until tomorrow (each try uses your plan);
+#   - deadlines older than 3 h (the PC was asleep) -> sync first, or wait for
+#     a sync already running, so a late digest isn't built on old data;
+#   - then Claude Code headless with the morning-digest skill, no window.
+# "Done today" is saved when Claude finished OK, also when there was nothing
+# new to send (the skill then sends nothing).
+def cmd_digest(db: Path, force: bool, claude: str | None) -> int:
+    if not db.exists():
+        print(f"No store yet ({db}). Run: uv run uni-copilot sync")
+        return 1
+    now = datetime.now(timezone.utc)
+    today = now.astimezone(SGT).date().isoformat()
+    conn = open_db(db)
+    done_day = get_state(conn, "digest_done")
+    day, _, n = (get_state(conn, "digest_tries") or "").partition(":")
+    tries = int(n) if day == today and n.isdigit() else 0
+    last_sync = freshness(conn).last_sync.get("ntulearn_gradebook")
+    conn.close()
+
+    if not force:
+        if now.astimezone(SGT).time() < DIGEST_AFTER:
+            print("Not yet: the digest runs after 07:30.")
+            return 0
+        if done_day == today:
+            print("Already done today.")
+            return 0
+        if tries >= DIGEST_MAX_TRIES:
+            print(f"Gave up for today after {tries} failed tries; see the lines above.")
+            return 0
+
+    if last_sync is None or now - last_sync > DIGEST_STALE:
+        _sync_before_digest(db, last_sync)
+
+    print("Running the morning digest (Claude Code headless)...")
+    code, output = run_claude_digest(claude)
+    print(output or "(no output)")
+    ok = code == 0 and "Not sent:" not in output  # the skill's line when sending failed
+    conn = open_db(db)
+    with conn:
+        if ok:
+            set_state(conn, "digest_done", today)
+        else:
+            set_state(conn, "digest_tries", f"{today}:{tries + 1}")
+    conn.close()
+    return 0 if ok else 1
+
+
+# The store is old: sync first. If another program is syncing, wait up to 3
+# minutes for it, then check again (it has probably just brought fresh data).
+def _sync_before_digest(db: Path, last_sync: datetime | None) -> None:
+    print(f"Deadlines are from {sgt_text(last_sync) if last_sync else 'never'}: syncing first.")
+    with file_lock(SYNC_LOCK, wait_s=180) as got:
+        if not got:
+            print("Another sync is still running; going ahead with the store as it is.")
+            return
+        conn = open_db(db)
+        fresh = freshness(conn).last_sync.get("ntulearn_gradebook")
+        conn.close()
+        if fresh is not None and fresh != last_sync and datetime.now(timezone.utc) - fresh <= DIGEST_STALE:
+            print(f"Another sync just finished (as of {sgt_text(fresh)}).")
+            return
+        _sync(db)
+
+
+# Runs `claude -p` with the morning-digest prompt and returns (exit code,
+# output). No window: CREATE_NO_WINDOW, and claude.exe is started directly
+# (not through claude.cmd, so no cmd.exe console either). Locked down like the
+# Telegram session; ANTHROPIC_API_KEY removed so it always uses your plan.
+def run_claude_digest(claude: str | None = None) -> tuple[int, str]:
+    exe = claude or find_claude()
+    if not exe:
+        return 1, "Claude Code not found: pass --claude <full path to claude.exe>."
+    env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+    env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false"
+    command = [exe, "-p", DIGEST_PROMPT, "--tools", "Skill,ToolSearch", "--no-chrome",
+               "--allowedTools", *DIGEST_ALLOWED, "--disallowedTools", "mcp__ntulearn__login"]
+    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    try:
+        r = subprocess.run(command, cwd=PROJECT_ROOT, env=env, stdin=subprocess.DEVNULL, capture_output=True,
+                           text=True, encoding="utf-8", errors="replace", timeout=DIGEST_TIMEOUT_S,
+                           creationflags=flags)
+    except subprocess.TimeoutExpired:
+        return 1, f"Claude took over {DIGEST_TIMEOUT_S // 60} minutes; stopped."
+    except OSError as e:
+        return 1, f"Claude Code couldn't start ({type(e).__name__})."
+    return r.returncode, "\n".join(part.strip() for part in (r.stdout, r.stderr) if part.strip())
+
+
+# Where claude.exe is: UNI_COPILOT_CLAUDE if set, else the real exe inside the
+# npm install next to `claude.cmd` on PATH, else whatever `claude` is on PATH.
+def find_claude() -> str | None:
+    if os.environ.get("UNI_COPILOT_CLAUDE"):
+        return os.environ["UNI_COPILOT_CLAUDE"]
+    launcher = shutil.which("claude.cmd") or shutil.which("claude")
+    if not launcher:
+        return None
+    exe = Path(launcher).parent / "node_modules" / "@anthropic-ai" / "claude-code" / "bin" / "claude.exe"
+    return str(exe) if exe.exists() else launcher
 
 
 # Every stored deadline (removed ones too), soonest first.
