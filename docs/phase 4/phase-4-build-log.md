@@ -28,6 +28,21 @@ server.py tools ──► Claude Code (terminal; Telegram session: everything ex
 
 Restaurant version, continuing Phase 3's: so far the restaurant only kept the **order book** (deadlines) and the **notice board** (announcements). Phase 4 opens the **library** next door: the course's own books (slides, pages). The **cache** is the photocopies on the shelf, dated, so nobody fetches the same book twice in a day. **Search** is the librarian with two ways of finding things: the **card catalogue** (exact words, FTS5) and a **librarian who knows what each book is about** (embeddings: "shortest route" → the Dijkstra chapter). The librarian's helper is an outside service (Gemini) with a daily allowance; when it's used up, the card catalogue still works, and the librarian says so.
 
+### Two kinds of data (your question, 29 Oct)
+
+```
+                     ┌─ 1. the course TREE (JSON, get_all ...contents?recursive=true) ─► parsers/content.py (step 6)
+NTULearn ───────────┤     ids, titles, kinds, release rules, page TEXT (HTML)             → ContentItem, Release, EmbeddedFile
+                     │     with the embedded files' signed links. One request per course; no file contents.
+                     │
+                     └─ 2. one FILE's bytes (get_file, step 4) ──► a sink (memory) ─────► parsers/files.py (step 7)
+                           only when that file is asked for          one file, then dropped → FileText (text per page)
+```
+
+- **A sink** holds one file's raw bytes (`%PDF-…`) for a moment; one per file, never the tree, never kept. It's a bucket, not storage.
+- **Saved** (from step 8 on, in `.data/cache/content.sqlite`): the tree, page text and file **text**. Never the PDFs themselves, never signed links. Only `download_file` (step 13) saves an actual file, in your Downloads folder.
+- **One request, end to end** ("what's in IE2108's week 10 slides?"): tree from the cache (or `get_all`) → find the Week 10 page and its embedded `xid` → file text from the cache if unchanged, else fresh signed link → `get_file` into a sink → step 7 extracts text → text cached, sink dropped → `FileText` → Claude answers citing the slides.
+
 ### Living next to the test week
 
 The scheduled sync imports `client/http.py`, `client/courses.py`, `models.py` and `config.py`. Phase 4 only **adds** to those files, and after each such step runs `uv run pytest` and checks the next `.data\sync.log` line. Phase 3 pieces (`store/`, `sources/`, `pilot_mcp/`, `notify/`, `cli.py`, the schedules, the skills) are not touched, except one line in `start-telegram.ps1` (step 19) and, after 3 Nov, one new function in `notify/telegram.py` (step 21).
@@ -399,12 +414,136 @@ git add src/uni_copilot/ntulearn_mcp/models.py docs
 git commit -m "feat(ntulearn): add result models for content, files and search"
 ```
 
+## Step 6: parsers/content.py (raw content JSON → the models)
+
+**New file `src/uni_copilot/ntulearn_mcp/parsers/content.py`.** Pure functions, no network (like Phase 1's `parsers/html.py`), so it's all testable offline. It turns what NTULearn sends into step 5's shapes, and works out three things NTULearn doesn't say directly.
+
+**1. Ultra pages and kinds**
+
+- **`find_ultra_pages(raws)`:** in a whole course tree (the probe's `recursive=true` list, where every item has `parentId`), finds folders whose only child is a document titled `ultraDocumentBody`, and returns `{folder id: that document}`. 136 such pages on your courses.
+- **`content_kind(raw, ultra_pages)`:** such a folder is a `page`; otherwise `HANDLER_KINDS` maps the content handler (`resource/x-bb-file` → `file`, `x-bb-asmt-test-link` → `assessment`, `x-bb-lesson` → `module`, …), and anything unknown is `other`.
+- **`to_content_item(raw, course_code, site_id, ultra_pages, release)`:** builds a `ContentItem`. The hidden body document itself returns `None`: it's shown through its folder, as the page. File items get their file name and type; assessments their `column_id`; pages their embedded files; descriptions (HTML on 178 items) become short plain text (`short_description()`, ≤ 500 characters).
+- **`page_body(raw, ultra_pages)`:** the HTML of a page: the hidden document's body for a page folder.
+
+**2. Release: is it open to you?**
+
+- **`release_from_public(raw)`:** for the cached tree, which only has `availability.available`: `Yes` → `open`, `PartiallyVisible` → `conditional` (has rules; whether you meet them isn't known there), anything else → `held_back` (to be safe; not seen on your courses).
+- **`release_from_internal(internal)`:** for an item from the internal API (its folder list carries the rules): no rules → `open`; `visibility` `VISIBLE` → `open_to_you`, `PARTIALLY_VISIBLE` → `held_back`, else `conditional`; `rule` = the first rule's title (the prof's words, UNTRUSTED); opens/closes from the first date-range criterion (rare: 8 of 142 on your courses).
+
+**3. Files embedded in pages, and keeping their links secret**
+
+- **`_scan_embedded(body)`:** walks a page's `<a data-bbfile='{...}'>` tags (the JSON is HTML-escaped inside the attribute, hence `html.unescape` before `json.loads`). Skips videos and tools (`data-bbtype` `embedded-app` / `video`, Phase 5) and pictures. Each file's id is the `xid-N_N` found in its link; a file whose JSON has no link gets `nolink-<n>` and `has_link=False` (the probe's 38). The same xid twice on a page is kept once.
+- **`embedded_files(body)`:** the safe part, `EmbeddedFile` objects, for tools and Claude.
+- **`embedded_links(body)`:** `{xid: signed link}`, **only** for the download code (step 9 → `get_file`), always from a page body fetched just now. The only function that returns a signed link; nothing may cache, log or show its result.
+- **`page_text(body)`:** a page as light Markdown plus its links. Phase 1's `parse_html` already writes every `<a data-bbfile>` as `[file: name]` without its link; this adds a second pass: any other signed link (`is_signed_file_link()`: anything on `*.blackboard.com`, or NTULearn's `/bbcswebdav/` and `/sessions/` paths, e.g. a link a prof pasted by hand) becomes `[file: text]` and is dropped from the links list.
+
+**4. Assessments**
+
+- **`assessment_details(raw, column, internal)`:** what `get_assessment` shows, from whichever of the three sources step 9 has: instructions (the item's `instructions` or `description`, as Markdown), due date (the gradebook column, else the internal item), attempts allowed, password required, secure browser and webcam required, late attempts allowed. Never a score, points or "grades released".
+
+**How it connects:**
+
+```
+client/contents.py (step 9)
+  ├─ tree (cache, recursive=true) ─► find_ultra_pages ─► to_content_item(release_from_public) ─► ContentList
+  ├─ one folder (internal list) ──────────────────────► to_content_item(release_from_internal) ─► ContentList
+  ├─ read_page ─► page_body ─► page_text ─► PageText (no signed links) + embedded_files
+  ├─ read_file_text (embedded) ─► page_body (fresh) ─► embedded_links[xid] ─► NtuLearnHttp.get_file
+  └─ get_assessment ─► assessment_details(item, gradebook column, internal item) ─► Assessment
+```
+
+**New ideas:**
+
+- **Content handler:** the type tag on every Blackboard item (`resource/x-bb-folder`, …); the tree is items pointing at their parent (`parentId`).
+- **Regular expression (`re`):** a pattern for finding text, e.g. `xid-\d+_\d+` = "xid-, digits, underscore, digits".
+- **HTML escaping inside an attribute:** `data-bbfile="{&quot;linkName&quot;: …}"`; `html.unescape` turns `&quot;` back into `"` so the JSON can be read.
+- **Defence in depth:** two separate passes hide signed links (Phase 1's parser and `page_text`), so one mistake doesn't leak them.
+
+Checks (29 Oct, offline): `python -m uni_copilot.ntulearn_mcp.parsers.content` on a made-up tree: 4 raw items → 3 content items (the page body folded into its page, which lists 2 embedded files, one without a link; the video skipped); internal rules → `held_back` with the rule title and the date window in SGT, no rules → `open`, rules met → `open_to_you`; page text with the hand-pasted signed link as `[file: the old notes]` and only the ordinary link kept; the quiz's details (lockdown browser, no late attempts, 1 attempt); 1 signed link kept for the download code and **none in anything shown**. `uv run pytest` → 186 passed, 4 skipped. Nothing the sync uses was touched.
+
+Check (PowerShell):
+
+```
+uv run python -m uni_copilot.ntulearn_mcp.parsers.content
+```
+
+Expect lines 1–5 as above, ending with `'SECRET' in anything shown: False`.
+
+Commit:
+
+```
+git add src/uni_copilot/ntulearn_mcp/parsers/content.py docs
+git commit -m "feat(ntulearn): parse course content, release rules and embedded files"
+```
+
+## Step 7: parsers/files.py (a file's bytes → its text)
+
+**Build order isn't run order** (your question): steps 4–7 build the parts on their own (the delivery truck `get_file`, the forms, the map reader, now the file reader), so each can be tested alone. At run time the tree is always read first, and a file is only fetched once the map says which one; step 9 puts the parts together in that order.
+
+**New file `src/uni_copilot/ntulearn_mcp/parsers/files.py`.** Takes one file's bytes (from a sink) and returns its text, one string per page, slide or part. Pure: no network, nothing saved.
+
+- **`detect_type(data, name, mime)`:** which reader to use, trusting the first bytes most: `%PDF-` → PDF; `PK` (a zip) holding `ppt/presentation.xml` → PPTX; `.ipynb` (or JSON with a `cells` list) → notebook; text extensions (`.txt`, `.csv`, `.md`, `.py`, …) or a `text/*` type → text. The mime label alone isn't trusted (the probe saw notebooks labelled `application/octet-stream`). Anything else raises **`UnsupportedFile`** with a plain message, e.g. "Reading old PowerPoint files (.ppt) isn't supported yet: only PDF, PPTX, notebooks and text files."
+- **`extract_text(data, name, mime) -> ExtractedText`:** the entry point. `ExtractedText` = the type + the list of page texts (+ `empty_pages`: pages with no text).
+- **PDF (`_pdf_pages`):** pypdf, page by page. A "protected" PDF is tried with an empty password (many only restrict printing); otherwise, or if damaged, **`UnreadableFile`** with a plain message. One bad page becomes an empty page instead of losing the rest. Pictures and scans have no text (no OCR, a plan non-goal) and count as empty.
+- **PPTX (`_pptx_pages`, `_shape_texts`):** python-pptx, per slide: every text box, tables as `a | b | c` rows, shapes inside groups, then the speaker notes as `Notes: …`. Before opening it, the **zip-bomb guard** adds up the sizes of everything inside the zip and refuses over 300 MB.
+- **Notebook (`_notebook_pages`):** Markdown cells as they are, code cells in ``` fences, outputs left out (they can be huge); a new part starts at each Markdown heading or after ~3,000 characters.
+- **Text (`_text_pages`):** decoded as UTF-8 (unreadable bytes become a replacement mark, never an error), cut at line breaks into ~3,000-character parts.
+- **`_tidy()`:** per page: no NUL characters, no trailing spaces, no runs of empty lines.
+- **`choose_pages(spec, page_texts, max_pages, max_chars)`:** for `read_file_text(pages=...)`: `"5"`, `"3-10"`, `"21-"` or nothing (= from the start), kept within 20 pages / 30,000 characters per call (step 3's limits); returns the page numbers, whether it was cut short, and `next_pages` ("15-30") to ask for next. A range past the end: "No such pages: '40-45'. This file has 30 pages."
+- `logging.getLogger("pypdf")` is set to errors only: pypdf otherwise warns about every small flaw in a PDF.
+
+**Safety:** course files are other people's files, so this only reads them: no macro, no program, nothing executed. `UnsupportedFile` and `UnreadableFile` are `ValueError`s, so the tools will pass their plain messages to Claude.
+
+**New ideas:**
+
+- **Magic bytes:** many file types start with a fixed signature (`%PDF-`, `PK` for zips), which is more reliable than a name or a label.
+- **A PPTX is a zip** of XML files (`ppt/presentation.xml`, one file per slide); python-pptx reads those.
+- **Zip bomb:** a small zip that unpacks to something enormous; checking the declared sizes first stops it before any unpacking.
+- **Text extraction vs OCR:** a PDF page either contains text (letters with positions, which pypdf reads) or only a picture of text, which would need OCR (reading letters from an image); we don't do OCR.
+
+Checks (29 Oct, offline, tiny files the self-test builds: a hand-written 3-page PDF, a PPTX made with python-pptx, a notebook, a CSV): `python -m uni_copilot.ntulearn_mcp.parsers.files` → PDF 3 pages, 1 empty, both texts right; PPTX labelled octet-stream still recognised, slide 1 with its notes, slide 2 with its table row `Dijkstra | O(E log V)`; notebook in 2 parts, output left out; CSV in 3 parts; `.ppt` and `.zip` → "not supported yet"; a broken PDF → "couldn't be read"; page ranges with `next_pages`, and a range past the end refused. `uv run pytest` → 186 passed, 4 skipped.
+
+Check (PowerShell): offline, then live (GET only, ~40 requests, about a minute; one real file of each kind read in memory and dropped; counts only):
+
+```
+uv run python -m uni_copilot.ntulearn_mcp.parsers.files
+uv run python -m uni_copilot.ntulearn_mcp.parsers.files --real
+```
+
+The live check prints, per kind (PDF file item, PPTX file item, embedded PDF / PPTX / notebook): size, pages, empty pages, characters, and two **jumble signs**: the share of one-letter words (broken spacing like "D i j k s t r a" makes it high; normal text is a few percent) and of words over 30 characters (missing spaces). If a PDF shows many one-letter words or long words, pypdf gets swapped for pypdfium2 (decision 6).
+
+**First live run (29–30 Oct):**
+
+- **Text quality is fine, pypdf stays:** a PDF file item (0.91 MB, 8 pages, 4,294 characters; one-letter words 0.9%, long words 0.1%), a PPTX file item (24.64 MB, 12 slides, 8,506 characters; 1.2% and 1.2%, likely links or code on slides), an embedded PDF (1 page, 1,017 characters; 0% and 0%). No empty pages.
+- **An embedded PPTX's download answered 404** ("NTULearn 404 on an embedded file"; the link stayed hidden, as designed).
+- **A bug in the self-test:** it caught only `ValueError`, so the `NtuLearnError` stopped the run before the notebook. Fixed: it now catches both, tries up to 3 files per kind, and on a failed embedded file prints the link's masked shape (digits → N, parameter names only) and each hop's host and status (the probe's `masked_shape` and `follow_download`), so the cause shows without the link.
+
+**Second live run (30 Oct):** the same three files read fine. The embedded PPTX (the only one with a link): its plain file-store link (no viewer settings) → NTULearn 302 → `alt-<id>.blackboard.com` answered **404 at once** (working files answer 302, then 200). So the page points to a file the file store doesn't have, most likely removed or replaced by the prof; the tools will say so in plain words. "Embedded notebook: none found", although the probe counted 31 `.ipynb`: they are the embedded files whose JSON has no link (the probe's 35 "only `mimeType`", labelled octet-stream).
+
+**Change to step 6 because of it:** `_scan_embedded` now falls back to the tag's own `href` when the JSON has no link, but only if `_file_store_link()` says it's NTULearn's file store (`https://ntulearn.ntu.edu.sg/bbcswebdav/...` with `xid-N_N` in the path): never another site. The offline self-test gained two cases: a notebook with its link only in `href` → `xid-777_1`, readable; an `href` to another site → "no link". Still no signed value in anything shown. `--real` now also prints how many embedded files still have no usable link, by extension, and scans every course.
+
+**Third live run (30 Oct):** "embedded files with no usable link: none": the `href` fallback gave every embedded file a link. Notebooks still "none found", because the check only looked inside Ultra pages' hidden bodies, while the probe's 85 other documents (with bodies of their own) hold the notebooks. Fixed in the check: it now reads every document with a body (the step 6 parser already treated those as pages).
+
+**Fourth live run (30 Oct): a real bug found.** The wider check reached another embedded PPTX (one that downloads), and reading it crashed: `NotImplementedError: Shape instance of unrecognized shape type`. Asking python-pptx for an unusual shape's `shape_type` (my group test, `shape.shape_type == MSO_SHAPE_TYPE.GROUP`, from the step 7 tidy-up) raises instead of answering. In `read_file_text` that would have failed the whole deck. Fixed in two layers: groups are now found with `isinstance(shape, GroupShape)` (no question asked of the shape), and each shape (and each slide's notes) is read inside `try`, so a strange shape loses only its own text. The self-test's tiny deck now has a grouped text box (read: "Text inside a group") and a fake unknown shape that raises on every question (skipped, no crash).
+
+**Fifth live run (30 Oct): all clean.** PDF file item (8 pages, 0.9% / 0.1%), PPTX file item (12 slides, 1.2% / 1.2%), embedded PDF (1 page, 0% / 0%), **embedded PPTX** 2.57 MB, 7 slides, 1,080 characters (2.6% / 0%; the deck that crashed before, its unusual shape now skipped), **embedded notebook** 0.01 MB, 1 part, 3,088 characters (4.3% one-letter "words" is normal for code: `i`, `x`, `=`). No empty pages anywhere; every embedded file has a usable link. pypdf stays (decision 6).
+
+**Done (30 Oct).**
+
+Commit:
+
+```
+git add src/uni_copilot/ntulearn_mcp/parsers/files.py docs
+git commit -m "feat(ntulearn): extract text from pdf, pptx, notebooks and text files"
+```
+
 ## Open items
 
 Everything not yet verified in Phase 4. Updated as steps finish.
 
-- **After step 2, urgent (29 Oct):** a plain `uv sync` with every Claude Code session closed, before the next session or digest starts (see the correction in step 2). (Verified, kept for the record: the first scheduled sync on the changed `.venv` and on step 3's `config.py`, started 22:59 on 29 Oct, finished normally, exit code 0, 2 new announcements; remind's catch-up at 22:59 too.)
-- **38 embedded files without a link in their JSON** (probe): step 9 counts them live.
+- **Resolved (29 Oct, 23:35), kept for the record:** the plain `uv sync` after step 2. It first still failed with every window closed: a Claude Code session from 25 Oct 22:08 was still running in a VS Code terminal (VS Code → PowerShell → `claude` → `uv run ntulearn-mcp`) and held `ntulearn-mcp.exe`. Once that one was closed, `uv sync` reinstalled the project (its record now lists numpy, pypdf, python-pptx), `uv run pytest` worked (186 passed, 4 skipped), and this session's servers reconnected with `/mcp`. Tip: before a `uv sync`, check Task Manager (or `tasklist /FI "IMAGENAME eq claude.exe"`) for forgotten sessions, including VS Code terminals. (Verified, kept for the record: the first scheduled sync on the changed `.venv` and on step 3's `config.py`, started 22:59 on 29 Oct, finished normally, exit code 0, 2 new announcements; remind's catch-up at 22:59 too.)
+- **Resolved (30 Oct, step 7), kept for the record:** the 38 embedded files without a link in their JSON (incl. the course notebooks) carry it in the tag's `href`; with step 6's fallback, every embedded file has a usable link.
+- **One embedded PPTX answers 404** on Blackboard's file server (removed from the store, still linked on its page). Step 9's `read_file_text` should turn that into a plain "NTULearn couldn't find this file; it may have been removed from the page".
 
 - **All of "Things to check" in `phase-4-core.md`:** the probe (step 1) answers the NTULearn ones; the Gemini ones are checked in steps 14 and 17.
 - **Gemini's free-tier data terms:** re-read when building step 14; billing is the switch if they're not acceptable.
