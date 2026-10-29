@@ -588,6 +588,69 @@ git add src/uni_copilot/ntulearn_mcp/cache.py docs
 git commit -m "feat(ntulearn): add content cache with fts5 search table"
 ```
 
+## Step 9: client/contents.py (the worker that puts it together)
+
+**New file `src/uni_copilot/ntulearn_mcp/client/contents.py`**: `ContentsClient` runs the parts of steps 4–8 in their running order (the tree first, then the item, then a file only if needed). The tools (step 10) and the indexer (step 12) call it.
+
+**1. Trees**
+
+- **`site_tree(site_id, course_code, refresh)`:** one course site's items: from the cache if under 6 hours old, else `GET .../contents?recursive=true` (a few pages at most), parsed (`find_ultra_pages`, `to_content_item` with `release_from_public`) and saved. Fetching a tree also **saves every page's text** (the bodies come with it), so pages are searchable at once, and **prunes** cached text of embedded files a page no longer has (`cache.prune_files`, new in `cache.py`: a replaced upload gets a new xid, and the old text mustn't stay findable).
+- **`subject_tree(course, refresh)`:** all sites of one subject (lecture + tutorial) together; a site that fails becomes a note, like Phase 1.
+
+**2. Listing (`list_folder`)**: one folder, or the top level (items whose `parentId` isn't in the tree: the course's hidden root folder isn't in the list). Items with release rules are then checked against the **internal folder list** (`/learn/api/v1/courses/{id}/contents/{folder|ROOT}/children`, 1 request per site, only if any item there has rules; not cached, since whether you meet a rule can change): `open_to_you`, `held_back`, dates, and the rule's title. If that request fails they stay `conditional` and a note says why. Asking to list a page says "use read_page".
+
+**3. Pages (`read_page`)**: from the cache if fresh, else the site's tree is fetched again (which saves every page's text). Returns the Markdown, links (never file links) and the embedded files.
+
+**4. Files (`file_text`, `file_pages`)**
+
+- **`file_text(course, content_id, file_ref, pages, refresh)`:** some pages of one file (`choose_pages`: 20 pages / 30,000 characters per call, `next_pages` for the rest).
+- **`file_pages(...)`** (also for the indexer): the whole text from the cache if made from the current version, else download → extract → save → return. **Version:** a file item's `modified` time; for an embedded file just its `xid` (a replaced upload gets a new xid, and the page's `modified` also changes when only its text is edited, which would re-download unchanged PDFs).
+- **`_file_start()`:** works out what to download **without downloading yet**: a file item's attachment (cached ids/names/types, `_attachments`) or an embedded file (by `xid`; optional when the page has only one). It returns a small function that produces the start only when called, so an embedded file's page is fetched only if its text isn't cached.
+- **`_fresh_embedded_link()`:** the signed link from the page fetched right now: an Ultra page's folder → its children (the hidden body); a plain document (no children list) → the document itself. Never cached, logged or returned.
+- **`_fetch_file()`:** `get_file` with NTULearn's 404 turned into "NTULearn couldn't find this file (404): it may have been removed, even though the page still links it." (the broken embedded PPTX from step 7).
+
+**5. Saving (`save_file`, for `download_file`)**: `<download_dir>/<COURSE>/<cleaned name>`; refuses videos; writes to `name.part` first (opened with `"xb"`: fails if it exists), renames when complete (`os.rename` refuses to overwrite on Windows), deletes the `.part` on any failure, then writes the **Mark of the Web** (`file:Zone.Identifier` with `ZoneId=3`, the note browsers add, so Office opens it in Protected View; skipped where the drive can't store it). Helpers: **`safe_file_name()`** (only the last part of any path, so `..\..\x` can't climb out; no `<>:"/\|?*` or control characters; no trailing dots or spaces; `CON`, `NUL`, `COM1`… prefixed with `_`; ≤ 150 characters with the extension kept; never empty) and **`unique_path()`** (`name (2).pdf`, `name (3).pdf`, …).
+
+**6. Assessments (`assessment`)**: by content id, or by the gradebook column id a deadline carries; live, ~4 requests: the public item (password, proctoring, instructions), the gradebook column (attempts, due), the internal item (release), and your status via Phase 1's `gradebook.my_statuses` (status only, no grade).
+
+**How it connects (one `file_text` call for an embedded PDF, first time):**
+
+```
+file_text("IE2108", page_id)
+  └─ _find ─► subject_tree ─► site_tree ─► cache fresh? ─ no ─► get_all(recursive) ─► parse ─► save_tree + save_page + prune_files
+  └─ file_pages
+       ├─ _file_start: embedded file xid-555_1 (no request yet)
+       ├─ cache.load_file_text(xid) ─ none ─► start() = _fresh_embedded_link ─► GET page children ─► signed link
+       ├─ _fetch_file ─► get_file(link, 50 MB, BytesIO)          (3 hops; 404 → plain message)
+       ├─ extract_text ─► cache.save_file_text (pages + search rows)
+       └─ return text ─► choose_pages ─► FileText (cached_at, from_cache=False)
+second call: tree and file text both from the cache, no request at all
+```
+
+**New ideas:**
+
+- **Lazy start** (a function that produces the download link only when called): the expensive or secret part happens only if it's really needed.
+- **Write to a temporary name, then rename:** a download that breaks half-way never leaves a broken file under the real name; the rename is all-or-nothing.
+- **Alternate data stream (`file:Zone.Identifier`):** NTFS can attach a small hidden note to a file; Windows uses it for the Mark of the Web.
+
+Checks (30 Oct, offline, a fake NTULearn with made-up data, a temporary cache): (1) the top level and (2) a folder from one tree request, the second listing from the cache; the internal list turned `conditional` into `held_back` ("Finish Quiz 9 first") and `open_to_you`; (3) a page with its signed link hidden and its embedded file by `xid`; (4) a file item downloaded once, then from the cache (page 2 only via `pages="2"`); (5) an embedded file, its fresh link fetched once; (6) 7 hours later, a replaced file item read again and replaced embedded slides' old text dropped; (7) a 404 as a plain message with no secret; (8) `T10.pdf`, then `T10 (2).pdf`, no `.part` left, Mark of the Web written; (9) the assessment found by column id: status `submitted`, attempts 2, lockdown browser, no late attempts, instructions, due in SGT, the fake score nowhere; (10) `..\..\Windows\evil.pdf` → `evil.pdf`, `CON.txt` → `_CON.txt`, `a<b>:c?.pdf` → `a_b__c_.pdf`, `...` → `file`; (11) wrong kinds and unknown ids as plain messages. `uv run pytest` → 186 passed, 4 skipped.
+
+Check (PowerShell, live, GET only, ~20–30 requests; a **temporary** cache, deleted afterwards; counts only):
+
+```
+uv run python -m uni_copilot.ntulearn_mcp.client.contents
+uv run python -m uni_copilot.ntulearn_mcp.client.contents --course IE2108
+```
+
+Expect: (1) the top level by kind, (2) the same again from the cache in a fraction of a second, (3) the whole tree by kind and release state, (4) a folder with rules after the internal list (whether `visibility` is there shows as `open_to_you` / `held_back` instead of `conditional`), (5) a page's size and embedded files, and how many embedded files have no link, (6) a file item and an embedded file, each read twice (second time from the cache), (7) an assessment's fields as yes/no, found by content id and by column id, (8) the temporary cache's counts.
+
+Commit:
+
+```
+git add src/uni_copilot/ntulearn_mcp/client/contents.py src/uni_copilot/ntulearn_mcp/cache.py docs
+git commit -m "feat(ntulearn): add contents client for trees, pages, files and assessments"
+```
+
 ## Open items
 
 Everything not yet verified in Phase 4. Updated as steps finish.

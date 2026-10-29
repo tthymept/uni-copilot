@@ -396,6 +396,19 @@ class ContentCache:
         return CachedFile(f["course_code"], f["file_name"], f["file_type"], pages, f["empty_pages"],
                           time_from_db(f["modified_at"]), time_from_db(f["extracted_at"]))
 
+    # Drops the cached text of an item's files that it no longer has (e.g. a
+    # page whose embedded slides were replaced: the new upload gets a new
+    # xid, and the old text mustn't stay findable). `keep` = the file_refs
+    # the item has now. Called by the contents client after every tree fetch.
+    def prune_files(self, site_id: str, content_id: str, keep: set[str]) -> int:
+        with self._connect() as conn, conn:
+            old = [r["file_ref"] for r in conn.execute(
+                "SELECT file_ref FROM files WHERE site_id = ? AND content_id = ?", (site_id, content_id))]
+            gone = [ref for ref in old if ref not in keep]
+            for ref in gone:
+                self._forget_file(conn, site_id, content_id, ref)
+        return len(gone)
+
     # ----- Forgetting -----
 
     # Removes one file's text everywhere (files, file_pages, search_text).
