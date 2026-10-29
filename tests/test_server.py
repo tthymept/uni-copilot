@@ -16,7 +16,9 @@ from uni_copilot.ntulearn_mcp.config import PROJECT_ROOT
 from uni_copilot.ntulearn_mcp.models import AnnouncementList
 
 TOOL_NAMES = {"login_status", "login", "list_courses", "upcoming_deadlines",
-              "recent_announcements", "recent_messages"}
+              "recent_announcements", "recent_messages",
+              # Phase 4 (step 10): the read-only content tools
+              "list_course_content", "read_page", "read_file_text", "get_assessment"}
 
 
 # Runs an async MCP call from a normal test.
@@ -24,7 +26,7 @@ def run(coro):
     return asyncio.run(coro)
 
 
-# Exactly the 6 Phase 1 tools exist, every one marked read-only. No grades tool.
+# Exactly the Phase 1 and Phase 4 tools exist, every one marked read-only. No grades tool.
 def test_tool_list():
     tools = run(server.mcp.list_tools())
     assert {t.name for t in tools} == TOOL_NAMES
