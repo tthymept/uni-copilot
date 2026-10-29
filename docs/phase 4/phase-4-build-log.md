@@ -233,7 +233,7 @@ Get-Content .data\sync.log -Tail 6
 
 Expect `6.21.4 1.0.2 2.5.4`, "186 passed, 4 skipped", and the 23:00 sync finishing normally in the log (this step changed `.venv`, which the scheduled jobs run from). Then restart the Telegram session (`scripts\start-telegram.ps1`).
 
-Later, when no Claude Code session is open: a plain `uv sync` once, so this project's own install records the new packages too. Nothing depends on it.
+Later, when no Claude Code session is open: a plain `uv sync` once, so this project's own install records the new packages too. ~~Nothing depends on it.~~ **Correction (29 Oct, found after step 5):** something does. Until that `uv sync`, every `uv run` tries to reinstall the project first, which rewrites `ntulearn-mcp.exe` and fails while any Claude Code session runs that server (`failed to remove file ... ntulearn-mcp.exe ... os error 32`; seen on `uv run pytest`). Claude Code starts its servers with `uv run` too (`.mcp.json`), so meanwhile a **new** session (a restarted Telegram session, the digest's headless `claude -p`) would start without its ntulearn and pilot servers. The scheduled sync and remind were never affected (they run `.venv\Scripts\pythonw.exe` directly). Fix: close every Claude Code session, `uv sync` once in a plain PowerShell, `uv run pytest`, then reopen (`claude --continue`) and restart the Telegram session. Lesson for later dependency changes: do the plain `uv sync` in the same sitting, with all sessions closed, not "some day".
 
 Commit:
 
@@ -344,6 +344,10 @@ uv run --no-sync python -m uni_copilot.ntulearn_mcp.client.http --file
 
 Expect two lines like `file item's attachment: 1.23 MB, application/pdf, via ['ntulearn.ntu.edu.sg', 'ntulearn.ntu.edu.sg', 'alt-….blackboard.com', 'alt-….blackboard.com'], starts like a PDF: True` and `embedded file: …, via ['ntulearn.ntu.edu.sg', 'alt-….blackboard.com', 'alt-….blackboard.com'], starts like a PDF: True`, then `a link off NTULearn -> A file download must start on NTULearn …` and `limit 1000 bytes -> The file is larger than 0.001 MB …`. Nothing is saved.
 
+**Live check (29 Oct): passed.** A file item's attachment: 0.91 MB, `application/pdf`, 4 hops (NTULearn, NTULearn, `alt-<id>.blackboard.com` × 2), real PDF bytes, 4.8 s. An embedded file: 0.03 MB, `application/pdf`, 3 hops (its signed link starts at the second NTULearn hop), real PDF bytes, 2.3 s. Both refusals worked: a link off NTULearn refused before any request, and the 1000-byte limit stopped the download. (The last two lines are refusals on purpose, not failures.) So a file costs about 1 second per hop: ~5 s for a file item, ~2–3 s for an embedded file.
+
+**Done (29 Oct).**
+
 Commit:
 
 ```
@@ -351,11 +355,55 @@ git add src/uni_copilot/ntulearn_mcp/client/http.py docs
 git commit -m "feat(ntulearn): add get_file for course file downloads"
 ```
 
+## Step 5: models.py (what the new tools return)
+
+**`src/uni_copilot/ntulearn_mcp/models.py`**, a new section "Phase 4: course content, files, search" after the Phase 1 models (which are unchanged; the sync uses some of them). Like Phase 1's models, these are the **output schema** Claude sees for each tool: field names, types and descriptions, with `UNTRUSTED` on everything written by other people.
+
+Building blocks:
+
+- **`ContentKind`:** what an item is: `folder`, `page` (an Ultra Document), `file`, `assessment` (Ultra makes tests and assignments the same kind of link), `survey`, `module`, `link`, `external_tool`, `video_gallery`, `other`. Step 6 maps NTULearn's content handlers onto these.
+- **`Release`** (replaces the old "locked" and opens/closes idea, after the probe): `state` is `open` (no conditions), `conditional` (has conditions, not checked whether you meet them: the cached tree only says "PartiallyVisible"), `open_to_you` (conditions met) or `held_back` (not met yet); `rule` = the rule's title written by the prof (UNTRUSTED), and `opens_at` / `closes_at` only for the rare date rules, each with an SGT text field.
+- **`EmbeddedFile`:** a file inside a page: `xid` (its id in NTULearn's file store, which the tools take), `name` (UNTRUSTED), `mime_type`, `has_link` (False for the ~38 the probe found without a link). **No link field**: signed links never leave the code that downloads.
+- **`ContentItem`:** one item: id, course, parent, title, kind, description, `release`, has_children, file name and type (file items), `column_id` (assessments: the same id deadlines carry), `embedded_files` (pages), `modified_at`, and `url` (the course page; a direct link to the item isn't verified).
+- **`_CachedResult`:** the base for content answers: `cached_at` (when the copy was fetched from NTULearn), `from_cache`, and `cached_sgt`, so every answer can say "cached at … SGT", like pilot's "as of".
+
+Tool answers:
+
+- **`ContentList`** (`list_course_content`): a folder's items.
+- **`PageText`** (`read_page`): the page as light Markdown, its links (never file links) and its embedded files.
+- **`FileText`** (`read_file_text`): `pages` (each a `FilePage`: number + text), `total_pages`, `cut_short` and `next_pages` ("21-40") when there's more than one call returns, `empty_pages` (pictures or scans; no OCR). Its text carries a stronger label: course files may contain instructions aimed at an AI, to be treated as content.
+- **`Assessment`** (`get_assessment`): instructions, due date, attempts allowed, password / secure browser / webcam required, late attempts allowed, your status, release. Never a score or points.
+- **`SearchResults`** (`search`): `hits` (each a `SearchHit`: source page / file / announcement / message / title, a snippet, where to look next: `content_id` + `file_ref` + `page`, or `event_id` for pilot, and `found_by` keyword and/or meaning), **`search_mode`** (`hybrid` or `keyword_only`) with **`mode_reason`** in plain words (your rule: the Gemini limit gives a proper answer), and **`coverage`** (`SearchCoverage`: how many courses, pages, files and posts are indexed, how many text pieces have embeddings, when the indexer last ran), so a miss is never mistaken for "it's not there".
+- **`DownloadResult`** (`download_file`): the saved file's cleaned name, full path, size and type.
+
+**New ideas:**
+
+- **Nested model:** `Release` sits inside `ContentItem` and `Assessment`, so "is it open?" has one shape everywhere.
+- **Computed field:** `opens_sgt`, `cached_sgt`, `due_sgt` aren't stored; pydantic works them out from the UTC time each time the model becomes JSON (the Phase 1 pattern).
+- **`Literal[...]`:** a field that may only hold one of the listed words; anything else is rejected when the model is built.
+
+Checks (29 Oct, offline): `python -m uni_copilot.ntulearn_mcp.models` now also prints a made-up folder listing (a held-back page with its embedded slides, "cached at Thu 29 Oct 22:00 SGT"), a date rule in SGT, and a keyword-only search with its reason; and checks all 12 new models' 72 field names: **no grade-like fields, no file-link fields**. `uv run pytest` → 186 passed, 4 skipped; `uni-copilot status` (the scheduled jobs' Python) and pilot's self-test work.
+
+Check (PowerShell):
+
+```
+uv run --no-sync python -m uni_copilot.ntulearn_mcp.models
+```
+
+Expect the Phase 1 lines 1–4 as before, then 5–8, ending with `12 new models, 72 field names. Grade-like fields: none; file-link fields: none`.
+
+Commit:
+
+```
+git add src/uni_copilot/ntulearn_mcp/models.py docs
+git commit -m "feat(ntulearn): add result models for content, files and search"
+```
+
 ## Open items
 
 Everything not yet verified in Phase 4. Updated as steps finish.
 
-- **After step 2:** a plain `uv sync` once when no Claude Code session is open. (Verified, kept for the record: the first scheduled sync on the changed `.venv` and on step 3's `config.py`, started 22:59 on 29 Oct, finished normally, exit code 0, 2 new announcements; remind's catch-up at 22:59 too.)
+- **After step 2, urgent (29 Oct):** a plain `uv sync` with every Claude Code session closed, before the next session or digest starts (see the correction in step 2). (Verified, kept for the record: the first scheduled sync on the changed `.venv` and on step 3's `config.py`, started 22:59 on 29 Oct, finished normally, exit code 0, 2 new announcements; remind's catch-up at 22:59 too.)
 - **38 embedded files without a link in their JSON** (probe): step 9 counts them live.
 
 - **All of "Things to check" in `phase-4-core.md`:** the probe (step 1) answers the NTULearn ones; the Gemini ones are checked in steps 14 and 17.
