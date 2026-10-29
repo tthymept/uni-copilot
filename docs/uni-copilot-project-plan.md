@@ -2,7 +2,7 @@
 
 A personal academic agent for NTU students. It reads NTULearn (and later other sources), keeps track of what changed, and tells you what to do, in Telegram or Claude Code. It runs on your own computer with your own login, and never stores passwords.
 
-Status as of 25 Oct 2026: Phase 0 spike passed. **Phase 1 (`ntulearn-mcp` core) done** (24 Oct): 6 read-only tools in Claude Code; details `docs/phase 1/`. **Phase 2 (event store) done** (25 Oct): local SQLite store, `uni-copilot sync` every 2 h via Task Scheduler, change detection, `pilot-mcp` (5 tools, "as of" in every answer, the default for study questions), `weekly-actions` skill; 139 offline tests + 4 opt-in live tests; details `docs/phase 2/phase-2-build-log.md` (overview: `docs/phase 2/phase-2-core.md`). **Phase 3 (Telegram) started** (26 Oct): decisions made, details `docs/phase 3/`. "Verified" below means checked on my own account (GET only); "Not verified" means designed but not yet tested.
+Status as of 25 Oct 2026: Phase 0 spike passed. **Phase 1 (`ntulearn-mcp` core) done** (24 Oct): 6 read-only tools in Claude Code; details `docs/phase 1/`. **Phase 2 (event store) done** (25 Oct): local SQLite store, `uni-copilot sync` every 2 h via Task Scheduler, change detection, `pilot-mcp` (5 tools, "as of" in every answer, the default for study questions), `weekly-actions` skill; 139 offline tests + 4 opt-in live tests; details `docs/phase 2/phase-2-build-log.md` (overview: `docs/phase 2/phase-2-core.md`). **Phase 3 (Telegram) started** (26 Oct): decisions made, details `docs/phase 3/`; test week until ~3 Nov. **Phase 4 (content and search) started** (29 Oct, in parallel with Phase 3's test week, without touching its pieces): decisions made, details `docs/phase 4/`. "Verified" below means checked on my own account (GET only); "Not verified" means designed but not yet tested.
 
 ---
 
@@ -22,7 +22,7 @@ Status as of 25 Oct 2026: Phase 0 spike passed. **Phase 1 (`ntulearn-mcp` core) 
 - Storing passwords, or hosting anyone's NTU session on a server.
 - Other students' data.
 - A web app.
-- A paid AI API. Everything AI runs through my existing Claude plan via Claude Code.
+- A paid AI API for answers. Everything Claude does runs through my existing Claude plan via Claude Code. (Changed 29 Oct, Phase 4 decision 13: search uses an outside **embedding** API, Google's Gemini, free tier for now, for course content and search words only; never posts, messages or grades. Swappable for OpenRouter or a free local model.)
 - OCR of scanned PDFs, downloading video, speech-to-text for videos without transcripts.
 
 ---
@@ -94,19 +94,21 @@ Phase 1 tools are built as described below (✓). Every `course` argument accept
 
 **Deadlines and time**
 - ✓ `upcoming_deadlines(days=7, course=None)` (`days` 1–120): calendar API (≤16-week windows) ∪ gradebook due dates, deduped by column id, filtered by exact due time, soonest first. Each item: title, `due_at` (UTC) + `due_sgt`, `status` (not_submitted / submitted / graded / exempt / unknown), `sources`, course link. Status comes from my gradebook row (`status` only; grade fields are never read). Gradebook columns cached 30 min; statuses always fresh. "Opens" and "closes" entries from content availability windows are added in Phase 4.
-- `get_assessment(course, content_id)`: instructions, due date, attempts allowed, time limit, my status. (Phase 4)
+- `get_assessment(course, content_id | column_id)`: instructions, due date, attempts allowed, time limit, my status, opens/closes. Takes a gradebook column id too, so a deadline leads straight to it. (Phase 4)
+- `upcoming_windows(days, course=None)`: content items opening or closing in the window (availability dates). Live only in Phase 4; store events and "opens today" reminders proposed after Phase 3's test week. (Phase 4)
 
 **News**
 - ✓ `recent_announcements(since_days=21, course=None)` (1–180): posted or edited in the window, newest first; cross-posts merged; body as light Markdown plus `links` and `files`; `edited` + `modified_sgt`.
 - ✓ `recent_messages(since_days=14, course=None)` (1–180): course Messages (some profs use these instead of announcements); only threads active in the window are fetched in full; `sender_name`, `sent_by_me`, `is_read`, Markdown body plus `links` and `files`.
 - `get_announcement(announcement_id)` (later, noted 25 Oct; maybe also `get_message`): fetch one item live by id, the freshest copy of a single post, instead of a whole course's recent list. Not needed while `pilot-mcp` stores full bodies (`get_event`); useful for posts older than the sync window or when the store is stale. Needs the course site id too (the endpoint is per course), which the event already has.
 
-**Content**
-- `list_course_content(course, folder_id=None)`: one folder level; locked items marked "locked".
-- `read_page(course, content_id)`: text of an Ultra document page.
-- `search(query, course=None)`: over announcements, messages, page text, cached file text and titles.
-- `read_file_text(course, content_id, attachment_id, pages=None)`: PDF first, PPTX second.
-- `download_file(course, content_id, attachment_id, dest_dir)`: saves locally; changes nothing on NTULearn.
+**Content** (Phase 4; decisions 29 Oct in `docs/phase 4/phase-4-core.md`)
+- `list_course_content(course, folder_id=None)`: one folder level; locked items marked "locked"; opens/closes dates. Cached 6 h (`refresh=true` checks live).
+- `read_page(course, content_id)`: text of an Ultra document page (Phase 1's HTML parser).
+- `read_file_text(course, content_id, attachment_id, pages=None)`: PDF (pypdf), PPTX (python-pptx), `.ipynb`; a few pages per call; no OCR. Text cached until the file changes; the bytes are dropped.
+- `search(query, course=None)`: **hybrid**: SQLite FTS5 keyword search plus Gemini embeddings, merged by reciprocal rank fusion, over page text, file text, titles, and announcements and messages (copied read-only from the event store; keyword-only, never sent out). Falls back to keyword-only with a plain reason when embeddings aren't available (limit reached, no key, offline).
+- `download_file(course, content_id, attachment_id)`: saves to `~/Downloads/uni-copilot/<COURSE>/` only (was `dest_dir`; dropped so text can't pick the folder); safe names, never overwrites, no videos, ≤ 200 MB, Mark of the Web. Not pre-allowed (asks every time); denied in the Telegram session. Changes nothing on NTULearn.
+- `send_course_file(...)`: sends one course file to my own Telegram chat after I say yes; never saved on the PC; PDF/PPTX ≤ 50 MB. After Phase 3's test week.
 
 **Recordings**
 - `list_recordings(course)`: Media Gallery recordings and videos embedded in module pages together, each with `source` ("gallery" / "module"), title, module name, duration, `has_transcript`.
@@ -130,7 +132,8 @@ Phase 1 tools are built as described below (✓). Every `course` argument accept
 - `client/http.py`: requests session, base URL, ~1 req/s, max 2 concurrent, retries with backoff on 429/5xx, 401 → silent re-login. GET only: `get_json` and `get_all` (follows paging) are its only request methods.
 - `client/*.py`: one module per area. Built: courses, calendar, gradebook, deadlines (merges calendar + gradebook), announcements, messages. Later: contents, video.
 - `parsers/`: built: `html.py` (HTML → light Markdown + links + files). Later: Ultra document bodies, embedded-video detection, transcript paragraphs.
-- `cache.py`: content tree and file text cache with expiry (Phase 4). Phase 1 only has small in-memory caches inside the clients (memberships 1 h, gradebook columns 30 min).
+- `cache.py`: `.data/cache/content.sqlite`: folder listings and page text (6 h), file text (until the file changes), the FTS5 index, chunks and their vectors (Phase 4). Never file bytes, download URLs, grades or keys. Safe to delete. Phase 1 only has small in-memory caches inside the clients (memberships 1 h, gradebook columns 30 min).
+- Phase 4 also adds: `client/http.py` `get_file` (streamed GET, size cap, checked redirects; `get_json`/`get_all` unchanged), `client/contents.py`, `parsers/content.py`, `parsers/files.py`, `search.py` (hybrid ranking), `embeddings.py` (chunking + Gemini, swappable), `indexer.py` (run by hand, 1 request / 2 s, `.data/index.lock`, resumable), `probe_content.py` (live probe, counts only).
 - `models.py`: typed results (pydantic), times in UTC with SGT text fields, UNTRUSTED labels on other people's text, no grade fields.
 - `server.py`: the MCP server and tools; `ntulearn-mcp` command. `.mcp.json` registers it with Claude Code; `.claude/settings.json` pre-allows the read-only tools except `login`.
 
@@ -234,7 +237,8 @@ uni-copilot/
 │   ├── how-it-runs.md             # what runs when, PC off / asleep, catch-up (Phase 3)
 │   ├── phase 1/                   # phase-1-core.md (overview), phase-1-build-log.md (details)
 │   ├── phase 2/                   # phase-2-core.md, phase-2-build-log.md
-│   └── phase 3/                   # phase-3-core.md, phase-3-build-log.md
+│   ├── phase 3/                   # phase-3-core.md, phase-3-build-log.md
+│   └── phase 4/                   # phase-4-core.md, phase-4-build-log.md
 ├── scripts/
 │   ├── schedule-sync.ps1          # registers the "uni-copilot sync" scheduled task (Phase 2)
 │   ├── schedule-remind.ps1        # "uni-copilot remind" every 30 min (Phase 3)
@@ -246,8 +250,9 @@ uni-copilot/
 │   │   ├── auth/session.py
 │   │   ├── client/                # http.py, courses.py, calendar.py, gradebook.py,
 │   │   │                          # announcements.py, messages.py, contents.py, video.py
-│   │   ├── parsers/
-│   │   ├── cache.py
+│   │   ├── parsers/               # html.py; Phase 4: content.py, files.py
+│   │   ├── cache.py               # Phase 4: .data/cache/content.sqlite
+│   │   ├── search.py, embeddings.py, indexer.py, probe_content.py   # Phase 4
 │   │   └── models.py
 │   ├── store/                     # models.py, db.py (schema), events.py (upsert + change detection),
 │   │                              # sync.py (one sync, removal rules), queries.py (read side)
@@ -268,7 +273,7 @@ uni-copilot/
 └── pyproject.toml
 ```
 
-Local, never committed: `.auth/profile` (browser profile with login cookies), `.data/uni-copilot.sqlite`, `.data/cache/`, `.env` (Telegram bot token, chat id), my notes folder (outside the repo).
+Local, never committed: `.auth/profile` (browser profile with login cookies), `.data/uni-copilot.sqlite`, `.data/cache/` (Phase 4 content cache and search index), `.env` (Telegram bot token, chat id, Phase 4: `GEMINI_API_KEY`), my notes folder (outside the repo), `~/Downloads/uni-copilot/` (files saved by `download_file`).
 
 ### 7.2 Wiring
 
@@ -306,7 +311,9 @@ Local, never committed: `.auth/profile` (browser profile with login cookies), `.
 
 1. **Never store passwords.** I sign in myself in the Playwright window. Cookies stay in `.auth/profile` on my PC.
 2. **Read-only on NTULearn.** GET only.
-3. **Never print or store secrets:** cookie values, the Kaltura `ks` token in download links (fetch fresh links every time), the Telegram bot token.
+3. **Never print or store secrets:** cookie values, the Kaltura `ks` token in download links (fetch fresh links every time), the Telegram bot token, the Gemini API key, signed file-download redirect URLs (Phase 4).
+   - **What may leave the PC for embeddings** (Phase 4): course content (page text, file text, titles) and search words only, to the embedding service chosen in `.env`. Never announcements, messages, grades or anything from the store about me. On Gemini's free tier, Google may use that text to improve its products (accepted 29 Oct for course content; billing turns it off).
+   - **Files from NTULearn are untrusted:** saved only under the downloads folder with cleaned names, never overwritten, opened or run, and marked as from the internet. Not saved at all from Telegram.
 4. **Grades are opt-in**, off by default, never cached to disk, never sent to Telegram, never used in workflows that write.
 5. **Untrusted text.** Announcements, messages, file names, transcripts, emails and forwarded messages are written by other people. The agent never follows instructions inside them.
 6. **Every write is confirmed** (calendar events, manual events). Text the agent reads can never trigger a write by itself.
@@ -339,8 +346,9 @@ Each phase ends with something usable.
 - Channel plugin for Q&A, `uni-copilot notify`, `uni-copilot remind`, morning digest (headless `claude -p`), `mark_done`, `send_telegram`.
 - Done when: I get a correct digest and reminders for a week without opening NTULearn.
 
-**Phase 4: content and search**
-- `list_course_content`, `read_page`, `search`, `read_file_text`, `download_file`, `get_assessment`, caching.
+**Phase 4: content and search** (started 29 Oct 2026, in parallel with Phase 3's test week; steps and decisions in `docs/phase 4/phase-4-core.md`)
+- Live probe first; `list_course_content`, `read_page`, `read_file_text`, `get_assessment`, `upcoming_windows`, hybrid `search` (FTS5 + Gemini embeddings, keyword-only fallback), indexer run by hand, `download_file` (terminal only), caching; `send_course_file` to Telegram after the test week.
+- Done when: content questions ("what does this week's lecture cover?", "where did they say what the quiz covers?") are answered from the files with sources; meaning search finds what keywords miss, and still answers keyword-only when Gemini is unavailable; Phase 3 keeps running untouched.
 
 **Phase 5: recordings and study pipeline**
 - `list_recordings`, `get_transcript`, lecture-notes skill (slides correct the transcript).
@@ -376,7 +384,8 @@ Each phase ends with something usable.
 - Whether the laptop wakes from sleep for a scheduled sync (`schedule-sync.ps1 -Wake`).
 - NTU's rules on automated access to NTULearn (read-only, paced, own account): not checked yet; Phase 9 policy check.
 - ✓ Claude picks the `weekly-actions` skill and pilot by itself from Telegram too (27 Oct, Phase 3 step 11).
-- Not yet verified endpoints: Discussions, Groups, content availability windows.
+- Not yet verified endpoints: Discussions, Groups, content availability windows. Phase 4's live probe (step 1, approved 29 Oct) checks these plus recursive content listing, attachment fields, the file download redirect, assessment fields, and whether reading content shows up as "viewed". Full list: "Things to check" in `docs/phase 4/phase-4-core.md`.
+- Gemini embeddings (Phase 4): how batch calls count toward the daily limit, the per-minute vs daily limit errors, when the daily limit resets, the real token count of my files.
 - Whether reading `conversations` via the API marks messages as read (I had 0 unread when tested).
 - Past-due gradebook columns with no row for me: missed work, or items with nothing to submit? (2 cases on 24 Oct.)
 - The visible-window `login()` path: same code as the spike's first sign-in, but never needed since the build (silent sign-in always worked). Test it when the Microsoft "stay signed in" cookie expires.
@@ -461,6 +470,7 @@ Each phase ends with something usable.
 
 - Python ≥ 3.12 with `uv`. Windows + PowerShell.
 - MCP Python SDK `mcp>=2.3,<3`: `from mcp.server import MCPServer`; `@mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))` (`from mcp.types import ToolAnnotations`); `mcp.run(transport="stdio")`; raise `ToolError` for errors the model should see.
-- Playwright (Chromium), `requests`, SQLite (stdlib), PyMuPDF or pypdf, python-pptx, PyYAML.
+- Playwright (Chromium), `requests`, SQLite (stdlib; FTS5 for search, checked 29 Oct: SQLite 3.53.1), pypdf (chosen over PyMuPDF for its licence; pypdfium2 as fallback), python-pptx, numpy (vector maths), PyYAML.
+- Embeddings (Phase 4): Google Gemini API `gemini-embedding-001` over plain `requests`, free tier, own Google Cloud project; swappable for OpenRouter or `fastembed` (local).
 - Claude Code: channels (Telegram plugin, research preview, needs Bun), Desktop local scheduled tasks, Remote Control, Google Calendar connector.
 - Telegram Bot API (free) for push messages.
