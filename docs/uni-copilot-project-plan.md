@@ -231,6 +231,7 @@ uni-copilot/
 ├── CLAUDE.md                      # short rules for Claude Code
 ├── docs/
 │   ├── uni-copilot-project-plan.md
+│   ├── how-it-runs.md             # what runs when, PC off / asleep, catch-up (Phase 3)
 │   ├── phase 1/                   # phase-1-core.md (overview), phase-1-build-log.md (details)
 │   ├── phase 2/                   # phase-2-core.md, phase-2-build-log.md
 │   └── phase 3/                   # phase-3-core.md, phase-3-build-log.md

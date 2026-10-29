@@ -2,7 +2,7 @@
 
 Personal academic agent for NTU students: reads NTULearn (Blackboard Ultra) and other sources into a local event store, then answers and pushes "what do I need to do" via Claude Code and Telegram. Runs locally with the student's own login. Never stores passwords.
 
-The full plan, architecture, roadmap and verified API facts are in `docs/uni-copilot-project-plan.md`. Read the relevant section before designing or changing a component. Check its "Open questions" before assuming an endpoint works.
+The full plan, architecture, roadmap and verified API facts are in `docs/uni-copilot-project-plan.md`. What runs when, and what happens when the PC is off: `docs/how-it-runs.md` (keep it up to date when a schedule or catch-up rule changes). Read the relevant section before designing or changing a component. Check its "Open questions" before assuming an endpoint works.
 
 ## Environment
 
