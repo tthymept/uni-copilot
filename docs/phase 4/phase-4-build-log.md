@@ -537,6 +537,57 @@ git add src/uni_copilot/ntulearn_mcp/parsers/files.py docs
 git commit -m "feat(ntulearn): extract text from pdf, pptx, notebooks and text files"
 ```
 
+## Step 8: cache.py (the shelf: the first thing that's saved)
+
+**Why store anything** (your question): tools read from the cache first and only go to NTULearn when a copy is too old, missing, or you ask for `refresh=true`. That makes repeat questions instant, means each file is downloaded and read once instead of per question (the tree costs 1 request per course, a file 3–5 requests plus reading), gives search text to look through without downloading anything, and keeps requests to NTULearn down.
+
+**New file `src/uni_copilot/ntulearn_mcp/cache.py`**: `.data/cache/content.sqlite` (git-ignored; created on first use). Built like the Phase 2 event store but separate from it (that file isn't touched): `MIGRATIONS` + `PRAGMA user_version`, WAL mode, a 5-second busy timeout (a terminal session, the Telegram session and the indexer may use the file at once), UTC times in one fixed text format, and one short connection per function (tools run in different threads).
+
+Tables:
+
+- **`courses`**: per course site, when its tree was fetched.
+- **`items`**: the tree, one `ContentItem` per row as JSON (no links), in NTULearn's order.
+- **`attachments`**: a file item's attachments (id, name, type), what `get_file` needs; no links.
+- **`pages`**: a page's light Markdown and links (never file links), its `modified`, when fetched.
+- **`files`** + **`file_pages`**: a file's text, one row per page or slide, with the item's `modified` it was made from.
+- **`search_text`**: the FTS5 table (`porter unicode61`: stemming, accents): one row per item title (+ description), per page, and per file page, with its source, course and where it is (`content_id`, `file_ref`, `page`); columns for announcements and messages (`event_id`) are ready for step 11.
+- **`state`**: small notes (e.g. when the indexer last finished).
+
+`ContentCache` (what step 9 calls):
+
+- **`save_tree` / `load_tree`:** replace / read a site's whole tree in one transaction. **Items that disappeared** from NTULearn lose their cached page and file text and their search rows, so search never finds removed things.
+- **`save_page` / `load_page`**, **`save_attachments` / `load_attachments`**.
+- **`save_file_text` / `load_file_text`:** `load_file_text` takes the `modified` time NTULearn shows **now** and returns the text only if it was made from that same version; after the prof replaces a file it returns `None`, so the caller reads it again. This is how "kept until the file changes" works.
+- **`is_fresh(fetched_at, now)`:** younger than 6 hours (`CONTENT_FRESH_S`); the caller decides when to use it.
+- **`item_modified`, `get_state` / `set_state`, `stats()`** (counts, for search's coverage line).
+
+Never stored: file bytes, raw page HTML, signed links. **`_scrub()`**, the last safety net (defence in depth, after `parse_html` and `page_text`), masks any signed file link that reaches a save function as `[file link hidden]`, and `save_page` drops signed links from the links list.
+
+**New ideas:**
+
+- **Cache:** a local copy kept so the original doesn't have to be fetched again; **fresh / stale**: young enough to trust, or not.
+- **Version check instead of a timer** (file text): keep the copy until the source says it changed (`modified`), however old.
+- **FTS5 virtual table:** looks like a table, but SQLite builds a word index behind it; `MATCH 'dijkstra'` finds rows containing the word (or "Dijkstra's", thanks to the tokenizer), `bm25()` ranks them, `snippet()` cuts out the matching bit. `UNINDEXED` columns are stored but not searched (where the hit is).
+- **Transaction** (`with conn:`): all of a tree replacement happens, or none of it.
+
+Checks (30 Oct, offline, a temporary file, made-up content): `python -m uni_copilot.ntulearn_mcp.cache` → (1) a tree saved and read back, fresh 1 hour later, stale 7 hours later; (2) a page with a hand-pasted signed link saved as `[file link hidden]`, only the ordinary link kept; (3) a file's text reused for the same version, `None` after the prof replaced it; (4) FTS5 `dijkstra` → the PDF's page 3 and the page, with snippets, ranked; (5) the page removed from the tree → its page text, file text and search rows gone; (6) "SECRET" nowhere in the file. `uv run pytest` → 186 passed, 4 skipped. `--real` shows the real file's version and counts (it creates an empty file on first use).
+
+Check (PowerShell):
+
+```
+uv run python -m uni_copilot.ntulearn_mcp.cache
+uv run python -m uni_copilot.ntulearn_mcp.cache --real
+```
+
+Expect lines 1–6 as above, ending with `'SECRET' anywhere in the file: False`; then `...\.data\cache\content.sqlite: schema version 1, CacheStats(courses=0, ...)` (empty until step 9 fills it).
+
+Commit:
+
+```
+git add src/uni_copilot/ntulearn_mcp/cache.py docs
+git commit -m "feat(ntulearn): add content cache with fts5 search table"
+```
+
 ## Open items
 
 Everything not yet verified in Phase 4. Updated as steps finish.
