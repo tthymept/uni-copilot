@@ -129,7 +129,7 @@ Phase 1 tools are built as described below (✓). Every `course` argument accept
 
 ### 4.3 Internal layout
 - `auth/session.py`: Playwright persistent profile, login, silent re-login (hidden browser first, visible window only if I need to sign in), cookie export. Leaves the Ultra page as soon as signed in.
-- `client/http.py`: requests session, base URL, ~1 req/s, max 2 concurrent, retries with backoff on 429/5xx, 401 → silent re-login. GET only: `get_json` and `get_all` (follows paging) are its only request methods.
+- `client/http.py`: requests session, base URL, ~1 req/s, max 2 concurrent, retries with backoff on 429/5xx, 401 → silent re-login. GET only: `get_json`, `get_all` (follows paging) and, since Phase 4, `get_file` (course files: follows the download redirects itself, only to NTULearn with cookies or `*.blackboard.com` without, counts bytes against a limit, never logs a link) are its only request methods.
 - `client/*.py`: one module per area. Built: courses, calendar, gradebook, deadlines (merges calendar + gradebook), announcements, messages. Later: contents, video.
 - `parsers/`: built: `html.py` (HTML → light Markdown + links + files). Later: Ultra document bodies, embedded-video detection, transcript paragraphs.
 - `cache.py`: `.data/cache/content.sqlite`: folder listings and page text (6 h), file text (until the file changes), the FTS5 index, chunks and their vectors (Phase 4). Never file bytes, download URLs, grades or keys. Safe to delete. Phase 1 only has small in-memory caches inside the clients (memberships 1 h, gradebook columns 30 min).

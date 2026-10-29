@@ -197,9 +197,166 @@ git add src/uni_copilot/ntulearn_mcp/probe_content.py "docs/phase 4" docs/uni-co
 git commit -m "feat(ntulearn): add live probe for course content endpoints"
 ```
 
+## Step 2: pyproject.toml + uv.lock (the new packages)
+
+**What was installed:**
+
+- **`pypdf` 6.21.4:** reads the text out of PDFs (step 7). Pure Python, BSD licence.
+- **`python-pptx` 1.0.2:** reads slide text, tables and speaker notes out of PPTX files (step 7). MIT licence.
+- **`numpy` 2.5.4:** fast maths on long lists of numbers: comparing embedding vectors in hybrid search (step 16).
+- **Pulled in by python-pptx:** `lxml` (reads the XML a PPTX is made of), `pillow` (images), `xlsxwriter` (charts inside slides). We don't use them directly.
+
+**`pyproject.toml`:** three new lines under `dependencies` (`numpy>=2.5.4`, `pypdf>=6.21.4`, `python-pptx>=1.0.2`). `>=` means "this version or newer"; `uv.lock` pins the exact versions (and those of every package they need), so every `uv sync` installs the same ones.
+
+**How it was installed, and why in two parts** (decided before this step): a plain `uv add` also reinstalls this project, which rewrites `.venv\Scripts\ntulearn-mcp.exe`, and Windows refuses while a Claude Code session runs that server. So:
+
+1. `uv add --no-sync pypdf python-pptx numpy`: only edits `pyproject.toml` and `uv.lock` ("Resolved 58 packages").
+2. `uv sync --inexact --no-install-project`: installs what the lock file lists but `.venv` doesn't have yet (the 6 packages above). `--no-install-project` leaves this project's own install and its programs alone; `--inexact` removes nothing that isn't in the lock file, so nothing the scheduled jobs use can disappear.
+
+Run at 22:55, before the 23:00 sync. uv warned "Failed to hardlink files; falling back to full copy": uv keeps downloaded packages in a cache on drive C: and links them into `.venv`, which doesn't work across drives (the project is on D:), so it copied them. Harmless; only a little more disk space.
+
+Checks (29 Oct):
+
+- `import pypdf, pptx, numpy` works and prints the versions above.
+- `.venv\Scripts\python.exe -m uni_copilot.cli status` (the Python the scheduled jobs use) works.
+- `ntulearn-mcp.exe`, `pilot-mcp.exe`, `uni-copilot.exe` still dated 25 Oct (not rewritten); pilot's self-test lists its 8 tools.
+- `uv lock --check`: the lock file matches `pyproject.toml`.
+- `uv run pytest` → 186 passed, 4 skipped.
+
+Check (PowerShell):
+
+```
+uv run --no-sync python -c "import pypdf, pptx, numpy; print(pypdf.__version__, pptx.__version__, numpy.__version__)"
+uv run --no-sync pytest
+Get-Content .data\sync.log -Tail 6
+```
+
+Expect `6.21.4 1.0.2 2.5.4`, "186 passed, 4 skipped", and the 23:00 sync finishing normally in the log (this step changed `.venv`, which the scheduled jobs run from). Then restart the Telegram session (`scripts\start-telegram.ps1`).
+
+Later, when no Claude Code session is open: a plain `uv sync` once, so this project's own install records the new packages too. Nothing depends on it.
+
+Commit:
+
+```
+git add pyproject.toml uv.lock docs
+git commit -m "build(deps): add pypdf, python-pptx and numpy for phase 4"
+```
+
+## Step 3: config.py (Phase 4 settings)
+
+**`src/uni_copilot/ntulearn_mcp/config.py`**, a new section "Phase 4: course content, files and search". Constants (fixed values, changed by editing the file):
+
+- **Paths:** `CONTENT_DB` = `.data/cache/content.sqlite` (content cache + search index; safe to delete), `INDEX_LOCK` = `.data/index.lock` (one indexer at a time).
+- **Freshness:** `CONTENT_FRESH_S` = 6 hours for folder listings and page text. File text has no age limit: it's re-read when the item's `modified` time changes (the probe found no size or modified time on attachments).
+- **Size limits**, counted while downloading because downloads never say their size up front: `READ_MAX_BYTES` 50 MB (reading and indexing), `DOWNLOAD_MAX_BYTES` 200 MB, `SEND_MAX_BYTES` 50 MB (Telegram's bot limit). `READ_MAX_PAGES` 20 and `READ_MAX_CHARS` 30,000 per `read_file_text` call.
+- **Download redirects:** `MAX_DOWNLOAD_REDIRECTS` 5; `FILE_HOST_SUFFIXES` = `.blackboard.com` (the probe's `alt-<id>.blackboard.com`; NTULearn itself is always allowed).
+- **Indexer pace:** `INDEXER_INTERVAL_S` 2.0 (half the tools' pace).
+- **Embeddings:** `GEMINI_API_KEY_NAME` (only the *name* of the `.env` line), `GEMINI_BASE_URL`, `EMBED_MODEL` `gemini-embedding-001`, `EMBED_DIMENSIONS` 768, `EMBED_MAX_REQUESTS_PER_MIN` 80 and `EMBED_MAX_TOKENS_PER_MIN` 24,000 (80% of the free tier's 100 and 30,000), `EMBED_BATCH_SIZE` 50, `CHUNK_WORDS` 300 with `CHUNK_OVERLAP_WORDS` 50.
+
+**Settings from the environment or `.env`**, two new `Settings` fields. Like the Telegram settings, a real environment variable wins, then a line in the project's `.env` (added after your question: at first they were read from the environment only, so a `.env` line would have done nothing). `config.py` has its own small `.env` reader, `_env_file_values()`, with the same rules as `notify/telegram.py`'s `read_env_file` (that one can't be imported here: it imports `config.py`, so importing it back would be circular). A missing or unreadable `.env` counts as empty, so it can never stop the sync. `NTULEARN_TERM` and `NTULEARN_ENABLE_GRADES` stay environment-only, as before.
+
+`.env` lines need no quotes, even for a path with spaces (everything after `=` is the value; one pair of quotes is removed if you use them). All three are optional until step 14:
+
+```
+# Phase 4 (optional)
+UNI_COPILOT_DOWNLOAD_DIR=D:\Uni\Course Files
+UNI_COPILOT_EMBEDDINGS=gemini
+GEMINI_API_KEY=<your key, from step 0's "your part">
+```
+
+The two fields:
+
+- `embeddings`: from `UNI_COPILOT_EMBEDDINGS`; `gemini` (default) or `off` (keyword-only search). Deliberately **not** checked in `load_settings()`: the scheduled sync and both servers call it at start, and a typo in a Phase 4 setting must never stop them. Search (step 16) will treat an unknown value as keyword-only and say why.
+- `download_dir`: from `UNI_COPILOT_DOWNLOAD_DIR` (`~` allowed), default `<your home>\Downloads\uni-copilot`, built by the new `_download_dir()`.
+
+Both fields have **defaults**, so every existing `Settings(term_override=..., enable_grades=...)` (in `tests/conftest.py` and older code) keeps working unchanged. Nothing else in the file changed.
+
+**New idea: a dataclass field with a default.** `download_dir: Path = field(default_factory=_download_dir)` means "if nobody passes `download_dir`, call `_download_dir()` to make one". `default_factory` (a function) instead of a plain default because the value depends on the environment at the moment `Settings` is built, not when the file is loaded.
+
+Checks (29 Oct, offline): the paths sit inside `.data/`; old-style `Settings(...)` still builds (with `gemini` and the default folder); a custom `UNI_COPILOT_DOWNLOAD_DIR=~/...` is expanded; `UNI_COPILOT_EMBEDDINGS=GEMNI` (a typo) loads without an error. `.env` reading, with made-up files only: a path with spaces and no quotes, a quoted value, a byte-order mark, a missing file (empty), and a real environment variable winning over `.env`; the real `.env` has none of the three lines yet (checked by name only, no values printed). `uni-copilot status` with the scheduled jobs' Python works; `uv run pytest` → 186 passed, 4 skipped.
+
+**Downloads and git:** the default folder is outside the repo, so git never sees it; nothing to add to `.gitignore`. If you ever point `UNI_COPILOT_DOWNLOAD_DIR` inside the project, use `.data\downloads` (already ignored by the `.data/` line) rather than a new folder.
+
+Check (PowerShell):
+
+```
+uv run --no-sync python -c "from uni_copilot.ntulearn_mcp.config import load_settings, CONTENT_DB; s = load_settings(); print(CONTENT_DB.name, s.embeddings, s.download_dir)"
+uv run --no-sync pytest
+```
+
+Expect `content.sqlite gemini C:\Users\<you>\Downloads\uni-copilot` and "186 passed, 4 skipped". The folder isn't created until the first download (step 13).
+
+Commit:
+
+```
+git add src/uni_copilot/ntulearn_mcp/config.py docs
+git commit -m "feat(ntulearn): add phase 4 settings for content, files and search"
+```
+
+## Step 4: client/http.py (`get_file`, the file download)
+
+**Why a new method.** `get_json` can't fetch a course file: a file isn't JSON, and the download leaves NTULearn. The probe showed the chain: NTULearn → NTULearn with a signed link → `alt-<id>.blackboard.com` (signed, no cookies needed) → the file, with no size header. `get_json` lets `requests` follow redirects and then decides "we ended up on another host = signed out", which is right for API calls and wrong here. So `get_file` follows the chain itself, one hop at a time.
+
+**What was added** (everything before it in the file is unchanged; the sync doesn't use any of it):
+
+- **`get_file(path_or_url, max_bytes, sink) -> FileInfo`**, the public method:
+  - `path_or_url`: an API path (a file item's `.../attachments/{id}/download`) or a full NTULearn link (an embedded file's signed `/bbcswebdav/` link, taken from a fresh page body).
+  - `sink`: where the bytes go, anything with `.write()`. `io.BytesIO()` keeps the file in memory (for reading its text); an open file saves it (for `download_file`). So the same method serves reading and saving, and a 200 MB download never has to sit in memory.
+  - Signs in first if needed; if NTULearn answers "signed out" (401, or a redirect to a host we don't allow, e.g. Microsoft's sign-in page), signs in silently once and starts again. Nothing is written to the sink before the final answer, so a restart begins clean.
+  - Returns `FileInfo(size, content_type, hosts)`: safe facts only (host *names*, never links).
+- **`_download()`**: the loop over hops, at most `MAX_DOWNLOAD_REDIRECTS` (5). NTULearn hops use the signed-in session (with cookies); other allowed hosts get a fresh session made by `file_session_factory` (no cookies, closed afterwards). A redirect to anything else is refused.
+- **`_send_file_hop()`**: one hop: `allow_redirects=False`, `stream=True` (headers first, body later), `Accept: */*`. Paced and limited like every request (1 per second, 2 at once); retries 429, 5xx and network errors with the same waits as `get_json`. Logs the hop number, host and status only.
+- **`_read_body()`**: reads the body in 64 KB chunks into the sink and stops with `FileTooLarge` as soon as the count passes `max_bytes` (or at once if the server announces a bigger size). Always closes the connection.
+- **`FileTooLarge`**: a `ValueError` with a plain message ("The file is larger than 50 MB, the limit for this; it wasn't fetched."), so the tools pass it to Claude as it is. If it happens, the sink holds a partial file that the caller throws away.
+- **`_allowed_file_host()`**: https, and NTULearn itself or a host ending in `FILE_HOST_SUFFIXES` (`.blackboard.com`).
+- **`_file_start()`**: an API path gets the base URL and is its own label in logs and errors (ids only, no secrets). A full link must be on NTULearn, and its label is always "an embedded file", because the link holds signed values.
+- **`NtuLearnHttp(..., file_session_factory=requests.Session)`**: a new optional parameter, so tests can hand in a fake file server. Existing `NtuLearnHttp()` and `NtuLearnHttp(signer=...)` calls are unaffected.
+- **`--file` self-test**: finds one PDF attachment of a file item and one PDF embedded in a page on your courses, downloads both into memory (thrown away), prints size, type, the hosts passed and "starts like a PDF", then checks two refusals (a link off NTULearn; a 1000-byte limit).
+
+**How it connects:**
+
+```
+read_file_text / indexer (steps 9, 12)      download_file (step 13)        send_course_file (step 22)
+        │ sink = io.BytesIO()                    │ sink = a temporary file       │ sink = io.BytesIO()
+        └──────────────────────► NtuLearnHttp.get_file(path_or_url, max_bytes, sink)
+                                   ├─ _file_start: API path or an NTULearn link only
+                                   ├─ _download: hop by hop (≤ 5 redirects)
+                                   │    ├─ ntulearn.ntu.edu.sg ── signed-in session (cookies)
+                                   │    ├─ *.blackboard.com ───── fresh session (no cookies)
+                                   │    └─ anything else ──────── refused (or "signed out" → one silent sign-in)
+                                   └─ _read_body: 64 KB chunks, FileTooLarge past the limit
+```
+
+**New ideas:**
+
+- **Streaming:** with `stream=True`, `requests` returns as soon as the headers arrive; the body is read piece by piece with `iter_content()`. That's how a size limit can stop a download half-way instead of after it has filled memory.
+- **Redirect (301/302/303/307/308):** "the thing you asked for is over there" plus a `Location` header. Following them by hand (`allow_redirects=False`) lets us check every host before going there.
+- **Signed link:** a link with a temporary signature in its query string; whoever has it can fetch the file for a while. Treated like a password: never logged, never in an error message, never returned.
+- **File-like object (a "sink"):** anything with `.write()`. `io.BytesIO` is a file that lives in memory.
+
+Checks (29 Oct, offline, fake sessions, no network): the verified 4-hop chain (2 hops with the cookie session, 2 with the cookie-less one, PDF bytes complete); a CDN redirect to an unknown host refused, with no link in the error; a redirect to Microsoft's sign-in page → one hidden sign-in → success; the size limit counted while reading and an announced size refused before reading; more than 5 redirects refused; an embedded link's 404 reported as "NTULearn 404 on an embedded file" (no link); a start off NTULearn refused before any request; 503 then 200 retried. `uv run pytest` → 186 passed, 4 skipped; `uni-copilot status` with the scheduled jobs' Python works. (These become real tests in step 23.)
+
+Check (PowerShell, live, GET only; about 40 requests, under a minute):
+
+```
+uv run --no-sync python -m uni_copilot.ntulearn_mcp.client.http --file
+```
+
+Expect two lines like `file item's attachment: 1.23 MB, application/pdf, via ['ntulearn.ntu.edu.sg', 'ntulearn.ntu.edu.sg', 'alt-….blackboard.com', 'alt-….blackboard.com'], starts like a PDF: True` and `embedded file: …, via ['ntulearn.ntu.edu.sg', 'alt-….blackboard.com', 'alt-….blackboard.com'], starts like a PDF: True`, then `a link off NTULearn -> A file download must start on NTULearn …` and `limit 1000 bytes -> The file is larger than 0.001 MB …`. Nothing is saved.
+
+Commit:
+
+```
+git add src/uni_copilot/ntulearn_mcp/client/http.py docs
+git commit -m "feat(ntulearn): add get_file for course file downloads"
+```
+
 ## Open items
 
 Everything not yet verified in Phase 4. Updated as steps finish.
+
+- **After step 2:** a plain `uv sync` once when no Claude Code session is open. (Verified, kept for the record: the first scheduled sync on the changed `.venv` and on step 3's `config.py`, started 22:59 on 29 Oct, finished normally, exit code 0, 2 new announcements; remind's catch-up at 22:59 too.)
+- **38 embedded files without a link in their JSON** (probe): step 9 counts them live.
 
 - **All of "Things to check" in `phase-4-core.md`:** the probe (step 1) answers the NTULearn ones; the Gemini ones are checked in steps 14 and 17.
 - **Gemini's free-tier data terms:** re-read when building step 14; billing is the switch if they're not acceptable.
@@ -212,4 +369,7 @@ Everything not yet verified in Phase 4. Updated as steps finish.
 - **Embedding / vector:** a long list of numbers that stands for a text's meaning; texts that mean similar things get similar numbers.
 - **Hybrid search:** keyword search and meaning search run together and their result lists are merged.
 - **Rate limit:** how much a service lets you use per minute or per day; per project for Gemini, so keys in the same project share it.
+- **Dependency / lock file:** a package the project needs, listed in `pyproject.toml` with a minimum version; `uv.lock` writes down the exact version of it and of everything it needs in turn, so installs are the same every time.
+- **Transitive dependency:** a package pulled in because another package needs it (lxml, pillow, xlsxwriter for python-pptx).
+- **Hardlink:** a second name for the same file on disk; impossible across drives, so uv copies instead.
 - **Graceful degradation:** when one part is unavailable, fall back to something that still works (keyword-only search) and say so, instead of failing.
