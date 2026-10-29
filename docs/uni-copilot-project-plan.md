@@ -93,9 +93,9 @@ Phase 1 tools are built as described below (✓). Every `course` argument accept
 - ✓ `list_courses(term=None, include_organizations=False)`: current-term subjects, each with its sites (e.g. IE2108 → lecture site + my tutorial site). `include_organizations` also lists Non-curriculum sites (NTU marks nothing as an organization). A personal alias file ("DSA" → IE2108) comes later.
 
 **Deadlines and time**
-- ✓ `upcoming_deadlines(days=7, course=None)` (`days` 1–120): calendar API (≤16-week windows) ∪ gradebook due dates, deduped by column id, filtered by exact due time, soonest first. Each item: title, `due_at` (UTC) + `due_sgt`, `status` (not_submitted / submitted / graded / exempt / unknown), `sources`, course link. Status comes from my gradebook row (`status` only; grade fields are never read). Gradebook columns cached 30 min; statuses always fresh. "Opens" and "closes" entries from content availability windows are added in Phase 4.
-- `get_assessment(course, content_id | column_id)`: instructions, due date, attempts allowed, time limit, my status, opens/closes. Takes a gradebook column id too, so a deadline leads straight to it. (Phase 4)
-- `upcoming_windows(days, course=None)`: content items opening or closing in the window (availability dates). Live only in Phase 4; store events and "opens today" reminders proposed after Phase 3's test week. (Phase 4)
+- ✓ `upcoming_deadlines(days=7, course=None)` (`days` 1–120): calendar API (≤16-week windows) ∪ gradebook due dates, deduped by column id, filtered by exact due time, soonest first. Each item: title, `due_at` (UTC) + `due_sgt`, `status` (not_submitted / submitted / graded / exempt / unknown), `sources`, course link. Status comes from my gradebook row (`status` only; grade fields are never read). Gradebook columns cached 30 min; statuses always fresh. "Opens" and "closes" entries were planned for Phase 4 but dropped after its probe (29 Oct: almost no date rules); release conditions are shown per item by the Phase 4 content tools instead.
+- `get_assessment(course, content_id | column_id)`: instructions, due date, attempts allowed, password needed, secure browser / webcam required, late attempts allowed, my status, release condition. Takes a gradebook column id too, so a deadline leads straight to it. Never score or points. (Phase 4)
+- ~~`upcoming_windows`~~: dropped 29 Oct after the Phase 4 probe (8 date rules in 966 items, none still to come; 134 "after another item"). Each item shows its release condition instead (open / conditional, open to me / held back until another item is done / opens-closes on a date).
 
 **News**
 - ✓ `recent_announcements(since_days=21, course=None)` (1–180): posted or edited in the window, newest first; cross-posts merged; body as light Markdown plus `links` and `files`; `edited` + `modified_sgt`.
@@ -103,7 +103,7 @@ Phase 1 tools are built as described below (✓). Every `course` argument accept
 - `get_announcement(announcement_id)` (later, noted 25 Oct; maybe also `get_message`): fetch one item live by id, the freshest copy of a single post, instead of a whole course's recent list. Not needed while `pilot-mcp` stores full bodies (`get_event`); useful for posts older than the sync window or when the store is stale. Needs the course site id too (the endpoint is per course), which the event already has.
 
 **Content** (Phase 4; decisions 29 Oct in `docs/phase 4/phase-4-core.md`)
-- `list_course_content(course, folder_id=None)`: one folder level; locked items marked "locked"; opens/closes dates. Cached 6 h (`refresh=true` checks live).
+- `list_course_content(course, folder_id=None)`: one folder level, with the files embedded in pages; each item's release condition (from the internal folder list, which carries the rules). Cached 6 h (`refresh=true` checks live).
 - `read_page(course, content_id)`: text of an Ultra document page (Phase 1's HTML parser).
 - `read_file_text(course, content_id, attachment_id, pages=None)`: PDF (pypdf), PPTX (python-pptx), `.ipynb`; a few pages per call; no OCR. Text cached until the file changes; the bytes are dropped.
 - `search(query, course=None)`: **hybrid**: SQLite FTS5 keyword search plus Gemini embeddings, merged by reciprocal rank fusion, over page text, file text, titles, and announcements and messages (copied read-only from the event store; keyword-only, never sent out). Falls back to keyword-only with a plain reason when embeddings aren't available (limit reached, no key, offline).
@@ -123,7 +123,7 @@ Phase 1 tools are built as described below (✓). Every `course` argument accept
 - `recent_grades(since_days=14, course=None)`: only registered when `NTULEARN_ENABLE_GRADES=1`.
 
 ### 4.2 Prompts (one-command workflows, work in any MCP client)
-- ✓ `weekly_actions` (built in Phase 2 as a Claude Code **skill**, `.claude/skills/weekly-actions/`, using the pilot store, not an MCP prompt; opening/closing windows wait for Phase 4): deadlines not yet submitted + announcements (~3 weeks) + messages + a logistics search for each test this week ("matric", "passport", "calculator", "venue", "bring") + opening/closing windows → checklist with sources; inferred items marked as inferred.
+- ✓ `weekly_actions` (built in Phase 2 as a Claude Code **skill**, `.claude/skills/weekly-actions/`, using the pilot store, not an MCP prompt; opening/closing windows were dropped in Phase 4, see `get_assessment`): deadlines not yet submitted + announcements (~3 weeks) + messages + a logistics search for each test this week ("matric", "passport", "calculator", "venue", "bring") → checklist with sources; inferred items marked as inferred.
 - `whats_new`: what changed since the last check.
 - `prep_for_lecture`: this week's slides + transcript summary for one course.
 
@@ -311,7 +311,7 @@ Local, never committed: `.auth/profile` (browser profile with login cookies), `.
 
 1. **Never store passwords.** I sign in myself in the Playwright window. Cookies stay in `.auth/profile` on my PC.
 2. **Read-only on NTULearn.** GET only.
-3. **Never print or store secrets:** cookie values, the Kaltura `ks` token in download links (fetch fresh links every time), the Telegram bot token, the Gemini API key, signed file-download redirect URLs (Phase 4).
+3. **Never print or store secrets:** cookie values, the Kaltura `ks` token in download links (fetch fresh links every time), the Telegram bot token, the Gemini API key, signed file links (Phase 4: the download redirects, and the `/bbcswebdav/...` links inside page bodies; read fresh each time, never cached).
    - **What may leave the PC for embeddings** (Phase 4): course content (page text, file text, titles) and search words only, to the embedding service chosen in `.env`. Never announcements, messages, grades or anything from the store about me. On Gemini's free tier, Google may use that text to improve its products (accepted 29 Oct for course content; billing turns it off).
    - **Files from NTULearn are untrusted:** saved only under the downloads folder with cleaned names, never overwritten, opened or run, and marked as from the internet. Not saved at all from Telegram.
 4. **Grades are opt-in**, off by default, never cached to disk, never sent to Telegram, never used in workflows that write.
@@ -335,7 +335,7 @@ Each phase ends with something usable.
 
 **Phase 1: `ntulearn-mcp` core** (done 24 Oct 2026)
 - `login_status`, `login`, `list_courses`, `upcoming_deadlines` (with status), `recent_announcements`, `recent_messages`.
-- Opens/closes windows moved to Phase 4 (need the content tree).
+- Opens/closes windows moved to Phase 4 (need the content tree); dropped there after the probe (29 Oct).
 - Done when: Claude Code answers "what's due this week?" correctly for all my courses. ✓ Checked against NTULearn on 24 Oct; one bug found and fixed (message senders showed as "GIVEN_NAME").
 
 **Phase 2: event store** (done 25 Oct 2026)
@@ -347,7 +347,7 @@ Each phase ends with something usable.
 - Done when: I get a correct digest and reminders for a week without opening NTULearn.
 
 **Phase 4: content and search** (started 29 Oct 2026, in parallel with Phase 3's test week; steps and decisions in `docs/phase 4/phase-4-core.md`)
-- Live probe first; `list_course_content`, `read_page`, `read_file_text`, `get_assessment`, `upcoming_windows`, hybrid `search` (FTS5 + Gemini embeddings, keyword-only fallback), indexer run by hand, `download_file` (terminal only), caching; `send_course_file` to Telegram after the test week.
+- Live probe first (done 29 Oct); `list_course_content`, `read_page`, `read_file_text` (file items and files embedded in pages), `get_assessment` (with release conditions; `upcoming_windows` dropped after the probe), hybrid `search` (FTS5 + Gemini embeddings, keyword-only fallback), indexer run by hand, `download_file` (terminal only), caching; `send_course_file` to Telegram after the test week.
 - Done when: content questions ("what does this week's lecture cover?", "where did they say what the quiz covers?") are answered from the files with sources; meaning search finds what keywords miss, and still answers keyword-only when Gemini is unavailable; Phase 3 keeps running untouched.
 
 **Phase 5: recordings and study pipeline**
@@ -384,7 +384,7 @@ Each phase ends with something usable.
 - Whether the laptop wakes from sleep for a scheduled sync (`schedule-sync.ps1 -Wake`).
 - NTU's rules on automated access to NTULearn (read-only, paced, own account): not checked yet; Phase 9 policy check.
 - ✓ Claude picks the `weekly-actions` skill and pilot by itself from Telegram too (27 Oct, Phase 3 step 11).
-- Not yet verified endpoints: Discussions, Groups, content availability windows. Phase 4's live probe (step 1, approved 29 Oct) checks these plus recursive content listing, attachment fields, the file download redirect, assessment fields, and whether reading content shows up as "viewed". Full list: "Things to check" in `docs/phase 4/phase-4-core.md`.
+- ✓ Discussions, Groups, content availability windows, recursive listing, attachment fields, the download redirect, assessment fields, "viewed" state: Phase 4 probe, 29 Oct (Appendix A). ✓ Follow-up (29 Oct): `PartiallyVisible` is not locked; pages answer 400 on the attachment list (their files are embedded in the body: 283, 126 PDFs); release rules with start/end live on the internal item. ✓ Second follow-up: release criteria are 134 "after another item" and 8 date ranges (none still to come); the internal folder list carries the rules; embedded files with a `resourceUrl` (39 of 283) download like attachments. ✓ Third follow-up: `viewerUrl` is a signed `/bbcswebdav/` file link too, and downloads the same way. Still open: 38 embedded files with no link in their JSON (maybe in the `<a href>`), checked in Phase 4 step 9. Whether NTULearn's server-side activity logs record API reads can't be seen from the API.
 - Gemini embeddings (Phase 4): how batch calls count toward the daily limit, the per-minute vs daily limit errors, when the daily limit resets, the real token count of my files.
 - Whether reading `conversations` via the API marks messages as read (I had 0 unread when tested).
 - Past-due gradebook columns with no row for me: missed work, or items with nothing to submit? (2 cases on 24 Oct.)
@@ -447,6 +447,35 @@ Each phase ends with something usable.
 - Ultra "Document" page = `x-bb-folder` with one `x-bb-document` child titled `ultraDocumentBody`; its `body` is the page HTML.
 - Locked items: availability `PartiallyVisible`, empty body.
 - Survey of 16 sites: PDF 156, mp4 9, PPTX 7, docx 4, ipynb 4; 109 quiz links; large trees (cache).
+
+**Content, Phase 4 probe (29 Oct, 16 sites, 108 GETs in 106 s, counts and field names only; `probe_content.py`)**
+- **Whole tree in one request:** `GET /learn/api/public/v1/courses/{id}/contents?recursive=true` → 200 on 16/16; every item has `parentId`; no site needed more than 10 pages of 200. 11 sites returned more than their top level (930 items), 5 had only a top level. 966 items in total.
+- Item types: `x-bb-folder` 283, `x-bb-file` 222, `x-bb-document` 221, `x-bb-asmt-test-link` 119, `x-bb-lesson` 48 (learning modules: `forcedSequence`), `x-bb-blti-link` 35 (external tools, incl. Turnitin settings in `customParameters`), `x-bb-externallink` 29, `x-bb-bltiplacement-NewUCVGalleryLTI_1_1` 5, `x-bb-asmt-survey-link` 4. No discussion items.
+- Item fields: `id`, `parentId`, `title`, `created`, `modified`, `position`, `availability` (`available`, `adaptiveRelease`, `allowGuests`, `allowObservers`), `contentHandler`, `links[]`, `launchInNewWindow`, `reviewable` (939), `hasChildren` (331), `hasGradebookColumns` (140), `description` (178), `body` (212). Files: `contentHandler.file.fileName` / `mimeType` (222/222). Tests: `contentHandler.assessmentId`, `gradeColumnId` (119/119), `password.enabled`, `proctoring.secureBrowserRequiredToTake` / `webcamRequired`, `isLateAttemptCreationDisallowed`; `contentHandler.instructions` on 10 items; `grading.due` on 12.
+- Ultra pages: 136 folders with exactly one `x-bb-document` child titled `ultraDocumentBody`; 212 of 221 documents have a body.
+- **No date windows:** `availability.adaptiveRelease` is present on all 966 items but has no `start`/`end` on any. `available`: `Yes` 745, `PartiallyVisible` 221 (151 of them with an empty body). The internal item shows no start/end fields either (only `permissions.adaptiveRelease.*`, what the viewer may do). 4 Turnitin items carry `customParameters.startdate` / `duedate` / `available_from` / `available_to`.
+- Attachments (`.../contents/{id}/attachments`): 200 on 19 items, 400 on 4 (which kind: follow-up). Fields: `id`, `fileName`, `mimeType` only (no size, no modified time). Mime types: pdf 15, zip 2, `application/octet-stream` 2.
+- **File download:** `.../attachments/{id}/download` → 302 to `ntulearn.ntu.edu.sg` (signed query string; with cookies) → 302 to `alt-<id>.blackboard.com` (signed; works **without** cookies) → 302 on the same host → 200 `application/pdf`, **no `Content-Length`**. 4 requests per file.
+- **Reading doesn't mark as viewed** (as far as the API shows): the internal item's tracking-looking fields (`isReviewable`, `permissions.*ReviewState`, `viewerUrl`) were the same before and after a download.
+- Assessments: the public gradebook column (`/learn/api/public/v2/courses/{id}/gradebook/columns/{columnId}`) gives `grading.attemptsAllowed`, `grading.due`, `availability.available`. The internal item (`/learn/api/v1/courses/{id}/contents/{contentId}`) gives `contentDetail.<handler>.test.deploymentSettings` (`attemptCount`, `timerCompletion`, `isDueDateEnforced`, `isLateAttemptCreationDisallowed`), `test.gradingColumn.dueDate`, `genericReadOnlyData.dueDate`. No time-limit field on the 3 probed.
+- **Follow-up (29 Oct, 43 GETs):**
+  - `PartiallyVisible` = "visible with release conditions", **not locked**: folder 80, document 79, test link 54, file 3, survey 2, LTI 2, external link 1. 3 of 3 such folders opened (children 200), 2 of 2 such files listed their attachments (200). 79 of the 85 items inside such folders are the `ultraDocumentBody` documents of Ultra pages.
+  - **Release rules exist, on the internal item only:** `/learn/api/v1/courses/{id}/contents/{contentId}` has `adaptiveReleaseRules.rules[]` (`id`, `title`, `type`, `criteria[]` with `id`, `type`, `negate`, `start`, `end`), plus `visibility`, and on some kinds `genericReadOnlyData.restrictions.contentVisibility.*.reasonCodes`. Folders also have `stateCompletion.started`. One request per item; what the criteria contain: second follow-up.
+  - **Pages have no attachment list:** `.../attachments` → 400 on `x-bb-document` items (3/3 page bodies, 3/3 other documents), 200 on `x-bb-file` (5/5). That explains the first run's 4 × 400.
+  - **Files embedded in page bodies: 283 on 164 pages** (the `data-bbfile` markup announcements use): `application/pdf` 126, no mime type 79, `application/octet-stream` 31, `text/csv` 20, `text/plain` 8, zip 5, images 7, PPTX/PPT/PPS 4, mp4 2, docx 1. `data-bbtype` values found: `embedded-app` 73, `attachment` 11, `video` 6. So many slides live inside Ultra pages, not as file items. How they download: second follow-up.
+  - Recursive listing: 0 sites with pages left over.
+- **Second follow-up (29 Oct, 171 GETs):**
+  - Release rules on all 142 `PartiallyVisible` items (page bodies left out); visible items have none (0 of 5). Every rule `type=User`. Criteria: **`Pre_Content` 134** ("after another item"), **`Date_Range` 8** (8 with a start, 1 with an end; 7 open now, 1 closed, **0 still to come**); none negated. The criterion fields don't name the other item.
+  - The internal `visibility` says whether *I* meet the rule: `VISIBLE` 124, `PARTIALLY_VISIBLE` 18 (really held back from me).
+  - The internal folder list (`/learn/api/v1/courses/{id}/contents/ROOT/children`) carries `adaptiveReleaseRules` on its items without any `expand` (1 of 17 root items on the first site), so listing one folder gives its rules in 1 request.
+  - Embedded files (283): `<a>` tags with no `data-bbtype` 193, `attachment` 11, `embedded-app` 73, `video` 6. JSON fields: `linkName` / `mimeType` 204, `render` 201, `viewerUrl` 158, `alternativeText` 79, `displayName` 70, `resourceUrl` 39, `fileName` / `fileSize` 7 (so almost never a size). Extensions: pdf 98, ipynb 31, csv 20, txt 8, zip 5, pptx/ppt/pps 4, images 6, mp4 2, docx 1, none 107.
+  - `resourceUrl` (39): `https://ntulearn.ntu.edu.sg/bbcswebdav/...` with a query string (35) or `/sessions/...` (4). One PDF: 302 → `alt-<id>.blackboard.com` (signed, no cookies) → 302 → 200 `application/pdf`, no `Content-Length`.
+- **Third follow-up (29 Oct, 22 GETs), embedded files' links:**
+  - `viewerUrl` and `resourceUrl` are the **same kind of link**: `https://ntulearn.ntu.edu.sg/bbcswebdav/<long>/xid-N_N?<3 signed parameters>`; `viewerUrl` adds `isInlineRender`, `locale`, `render`, `xythos-download`. A viewer-only PDF: 302 → `alt-<id>.blackboard.com` (signed, no cookies) → 302 → 200 `application/pdf`, no `Content-Length`. So every embedded file with either link downloads the same way (3 requests).
+  - By tag: no `data-bbtype` 193 (`viewerUrl` 156, `resourceUrl` 32, both 30, **only `mimeType`, no link: 35**); `attachment` 11 (3 with no link); `embedded-app` 73 (only `url`: videos and tools, Phase 5); `video` 6 (no link fields). The 38 without a link may carry it in the `<a href>` (not checked).
+  - 4 `resourceUrl`s are images under `/sessions/...`.
+  - **The signed parameters are secrets**, like Kaltura's `ks`: read fresh from the page body each time, never stored, logged or shown. Phase 1's `parse_html` already turns every `<a data-bbfile>` into `[file: name]` without its link.
+- Discussions: `public v1 .../discussions` → 200 with 0 items on 16/16; `internal v1 .../discussions` → 404. Groups: `public v2 .../groups` → 200 on 16/16, **193 groups**, fields `name`, `availability.available`, `enrollment.type`, `enrollment.limit`, `enrollment.signupSheet` (`name`, `description`, `showMembers`), `groupSetId`; `public v1 .../groups` → 200 with 0 items.
 
 **Recordings**
 - Media Gallery: content handler `resource/x-bb-bltiplacement-NewUCVGalleryLTI_1_1`; `GET /learn/api/public/v1/lti/placements?handle=NewUCVGalleryLTI_1_1` → `_1327_1`.

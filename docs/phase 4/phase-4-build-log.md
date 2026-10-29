@@ -9,7 +9,7 @@ What each finished step changed, how to test it, and its commit. Unverified poin
 ```
 NTULearn (GET only)
   └─ client/http.py: get_json / get_all (Phase 1, unchanged) + get_file (Phase 4: streamed, size cap, checked redirects)
-       └─ client/contents.py: folders, pages, file text, assessments, windows
+       └─ client/contents.py: folders (with release conditions), pages, embedded files, file text, assessments
             ├─ parsers/content.py   content JSON → ContentItem (kind, locked, opens/closes)
             ├─ parsers/html.py      page HTML → Markdown (Phase 1)
             └─ parsers/files.py     PDF / PPTX / ipynb → text per page or slide
@@ -86,6 +86,116 @@ git commit -m "docs: plan phase 4 content and search"
 ```
 
 **Done (29 Oct).**
+
+## Step 1: probe_content.py (the live probe)
+
+**New file `src/uni_copilot/ntulearn_mcp/probe_content.py`:** a one-off, re-runnable script that asks NTULearn read-only questions about course content and prints **what the answers look like**: counts, status codes, field names, item types (content handlers such as `resource/x-bb-folder`) and mime types. Never titles, bodies, file names, dates, ids or URLs. Nothing is saved.
+
+What it checks:
+
+1. **The content tree** per site: `GET .../courses/{id}/contents` (the top level), then the same with `recursive=true`. If the recursive answer has more items than the top level, one request per course is enough for the whole tree (big for the indexer). If not, it walks one level down into up to 3 folders instead (`.../contents/{id}/children`). Also: how many pages were left over (`paging.nextPage`), and every field name with how many items had it.
+2. **Ultra pages:** how many `x-bb-document` items are titled `ultraDocumentBody` and have a body, and how many folders have exactly that one child. Titles are compared inside the script only.
+3. **Availability and windows:** counts of `availability.available` (Yes / No / PartiallyVisible), how many items have `availability.adaptiveRelease` start/end dates, on which item types, how many are still in the future, and how many locked items have an empty body or a window.
+4. **Attachments** of up to 2 file items per site: status, field names (does it give a size? a modified time?), mime types.
+5. **Discussions and Groups:** `public v1 .../discussions` and `public v2 .../groups` on every site, plus `public v1 .../groups` and `internal v1 .../discussions` on the first site only. Status and item counts.
+6. **One PDF download, headers only:** `.../attachments/{id}/download` sent by hand without following redirects (`allow_redirects=False`, `stream=True`, closed after the headers, so the file isn't read). For each redirect: the target **host name** only, whether the link carries a query string (a sign of a signed, temporary link), and whether that host answers without NTULearn's cookies. At the end: status, `Content-Type`, whether `Content-Length` is there.
+7. **Up to 3 quizzes/assignments:** their `contentHandler` field names, how many content items point at a gradebook column (`contentHandler.gradeColumnId`, the link to deadlines), and the attempt / time / availability field names of that column and of the internal content item.
+8. **"Viewed" check:** the internal content item's tracking-looking field names (view, review, progress, read, access, completion) before and after the download, and which of them changed. Values are compared, never printed.
+
+How it's built:
+
+- **`probe_get()`** goes through `NtuLearnHttp.get_json` (so sign-in, 1 request/s, retries and GET-only all apply) but returns the status instead of raising, because an error status (403, 404) is an answer we want to record.
+- **`probe_list()`** follows `paging.nextPage` up to 10 pages and retries once without `limit` if NTULearn rejects it.
+- **`key_paths()`** turns a JSON object into dotted field names (`availability.adaptiveRelease.start`) without values, which is what makes the output safe to print.
+- **`raw_get_headers()`** is the one place that doesn't use `get_json`: a download is a redirect to another host, and `get_json` would follow it and decide "another host = signed out" (the reason for step 4's `get_file`). It borrows the client's pacer and session, uses a fresh session without cookies for other hosts, and never reads the body.
+- Logging is set to warnings only, because the client's info lines name request paths with ids.
+- `--sites N` probes only the first N sites; `--no-download` skips checks 6 and 8.
+
+Checks so far (offline): the helpers on made-up items (field paths, window and Ultra-page counts) and `--help`; `uv run pytest` → 186 passed, 4 skipped (nothing imports the probe).
+
+Check (PowerShell, live, GET only; about 3 minutes):
+
+```
+uv run --no-sync python -m uni_copilot.ntulearn_mcp.probe_content --sites 1
+uv run --no-sync python -m uni_copilot.ntulearn_mcp.probe_content
+```
+
+The first is a short trial on one site (about 10 requests). The second probes every site and ends with `Done: N requests in N s. Nothing was saved.` Progress lines (`site 3/16 (IE2108) ...`) go to the screen only. Paste the output into the chat: it has no content, only counts and names. The results then go into the plan's Appendix A.
+
+**First run (29 Oct): 108 requests in 106 s**, all 200 except where noted, nothing saved. Full facts in the plan's Appendix A ("Content, Phase 4 probe"). What they mean for Phase 4:
+
+- **Good news:** `recursive=true` lists a whole course in one request (966 items on 16 sites), so the indexer only needs ~20 requests for every tree. Every quiz link (119) carries its gradebook column id, so a deadline leads straight to its quiz. A download changed none of the item's "reviewed" fields.
+- **Downloads:** NTULearn → NTULearn (signed link) → `alt-<id>.blackboard.com` (signed link, no cookies needed) → the PDF, with no `Content-Length`. So `get_file` (step 4) follows up to 5 redirects to two allowed hosts and counts bytes as they arrive. 4 requests per file: a first full index of ~220 files ≈ 900 requests ≈ 30 minutes at the indexer's pace.
+- **No opens/closes dates:** none of the 966 items has an availability date; only 4 Turnitin items have start/due dates in their settings. So `upcoming_windows` is proposed to be dropped (see "Changed by the probe" in `phase-4-core.md`).
+- **Attachments** have only `id`, `fileName`, `mimeType`, so a changed file is noticed by the content item's `modified` time.
+- **Discussions:** none. **Groups:** 193, with sign-up sheets (Phase 8).
+- **Still unclear:** what the 221 `PartiallyVisible` items are (none have dates, 151 have no body), which item kind answered 400 on 4 attachment lists, and whether slides also sit inside page bodies as embedded files.
+
+**Follow-up (`--follow-up`):** added after the first run, about 40 requests:
+
+- **A:** the whole trees again.
+- **B:** `PartiallyVisible` items by kind, how many have an empty body, and how many items sit inside a `PartiallyVisible` folder.
+- **C:** files embedded in page bodies (`data-bbfile` markup, decoded with `html.unescape` and `json`): count, `data-bbtype` values, mime types.
+- **D:** attachment-list status for 4 kinds: files, `PartiallyVisible` files, `ultraDocumentBody` documents, other documents.
+- **E:** whether `PartiallyVisible` folders open.
+- **F:** release-rule field names on the internal item, one per `PartiallyVisible` kind (ignoring `permissions.*`, which only says what you may do).
+
+Checked offline with made-up items: embedded files counted, both quoting styles of `data-bbfile` read, the `PartiallyVisible` parent counted. `uv run pytest` → 186 passed, 4 skipped.
+
+```
+uv run --no-sync python -m uni_copilot.ntulearn_mcp.probe_content --follow-up
+```
+
+**Follow-up run (29 Oct): 43 requests in 41 s.** Full facts in Appendix A ("Follow-up").
+
+- **`PartiallyVisible` isn't locked:** it means "visible with conditions". Those folders opened and those files listed their attachments. Mostly folders (80, many of them Ultra pages), page bodies (79) and quizzes (54).
+- **Pages have no attachment list** (400 on all 6 documents tried), which explains the first run's 400s. Their files are **embedded in the body: 283 files on 164 pages, 126 of them PDFs.** About half the slides live there rather than as file items, so the reading and download tools must handle both.
+- **Release rules exist** on the internal item (`adaptiveReleaseRules.rules[].criteria[]` with `start`, `end`, `type`, `negate`), one request per item. The public `adaptiveRelease` field was empty because it only covers simple date availability, not these rules (likely; not verified).
+
+**Second follow-up (`--follow-up-2`), the last probe run:**
+
+- **A:** the whole trees again (16 requests).
+- **G1:** two tries at a list request that includes the rules: internal `.../contents/ROOT/children`, with and without `expand=adaptiveReleaseRules`.
+- **G2:** the internal item of every `PartiallyVisible` item except page bodies (capped at 150), plus one visible item of each kind for comparison. Counted: rule and criterion types (enum words like `DATE`), date criteria with a start or end, whether each is not open yet, open now or closed, negated criteria, `visibility` values and reason codes. Never rule titles (written by profs) or dates.
+- **H:** embedded files: the tag and `data-bbtype` around each one, the JSON field names, file extensions (`.pdf`, never the name), and the shape of `resourceUrl` (host, first path segment, query or not; never the URL).
+- **H2:** one embedded PDF's download, headers only, with the same redirect check as the first run. That code moved into a shared `follow_download()`.
+
+Checked offline: a made-up item with two date criteria and a negated membership criterion counts as 2 date criteria (1 not open yet, 1 closed); two made-up embedded files (an `<a>` with HTML-escaped JSON, an `<img>` with plain JSON) give their tags, extensions and URL shapes. `uv run pytest` → 186 passed, 4 skipped.
+
+```
+uv run --no-sync python -m uni_copilot.ntulearn_mcp.probe_content --follow-up-2
+```
+
+**Second follow-up (29 Oct): 171 requests in 169 s.** Full facts in Appendix A ("Second follow-up").
+
+- **Release rules:** all 142 conditional items have one; 134 are "after you finish another item", 8 are date ranges (none still to come). NTULearn's `visibility` says 124 are already open to you, 18 are really held back. The internal folder list already carries the rules (no `expand` needed). So `upcoming_windows` is proposed to be dropped, and items say open / conditional, open to you / held back / opens-closes <date> instead ("Changed by the probe" in `phase-4-core.md`).
+- **Embedded files:** only 39 of 283 have a `resourceUrl`; those download like attachments (`/bbcswebdav/...` → the Blackboard file server, no cookies needed there → the file, no size header). 158 have only a `viewerUrl`. 31 are Jupyter notebooks (`.ipynb`, the "octet-stream" ones). 7 of 283 give a size.
+
+**Third follow-up (`--follow-up-3`), about 20 requests:** the trees again, then per kind of embedded tag which link fields come together (`resourceUrl`, `viewerUrl`, `url`, `fileSize`, `mimeType`), the **masked shape** of every `viewerUrl` and `resourceUrl`, and one viewer-only PDF followed by hand, headers only. `masked_shape()` keeps the host and the path's structure but turns digits into `N`, a part with a dot (a file name) into `<name>.ext`, very long parts into `<long>`, and keeps only the names of query parameters, so no id, file name or signed value is printed. Checked offline on three made-up links.
+
+```
+uv run --no-sync python -m uni_copilot.ntulearn_mcp.probe_content --follow-up-3
+```
+
+**Third follow-up (29 Oct): 22 requests in 20 s.** Full facts in Appendix A ("Third follow-up").
+
+- **Both link kinds are the same signed file link:** `/bbcswebdav/<long>/xid-N_N?<3 signature parameters>`, the viewer one with display settings added. A viewer-only PDF downloaded like the others (→ `alt-<id>.blackboard.com`, no cookies → the PDF). So every embedded file with a link is reached in 3 requests, and its link comes with the page body that the tree listing already returns.
+- **The signature parameters are secrets** (like Kaltura's `ks`): read fresh, never cached, logged or shown. Phase 1's `parse_html` already writes every `<a data-bbfile>` as `[file: name]` without its link (checked in the code); `parsers/content.py` (step 6) will also hide any hand-pasted `/bbcswebdav/` link with a query string.
+- **`xid-N_N`** (the file's id in NTULearn's file store) is the embedded file's id for the tools.
+- 38 embedded files have no link in their JSON (maybe in the `<a href>`); step 9 counts them live. 73 embedded apps and 6 videos are Phase 5.
+
+**Step 1 is done:** four runs, 344 GETs in total, nothing saved, no content printed. What changed in the plan because of it is in "Changed by the probe" in `phase-4-core.md`: no `upcoming_windows` (you agreed 29 Oct: "do as you recommend"; decision 9 rewritten, done-when 5 changed, the plan's sections 4.1, 4.2 and 9 updated), conditions shown per item instead, embedded files handled by every file tool, `get_file`'s redirect rules, `modified` as the change signal, and the indexer's first run ~40 minutes.
+
+**Decided before step 2 (29 Oct): this session can stay open for installing.** A plain `uv add` reinstalls the project too, which rewrites `.venv\Scripts\ntulearn-mcp.exe`, and Windows won't let a running program's file be replaced (this session runs that server). So step 2 uses `uv add --no-sync` (only `pyproject.toml` and `uv.lock`) and then `uv sync --inexact --no-install-project` (only the new packages; nothing removed). Both flags are in uv 0.12.11 (`--help` checked).
+
+**Done (29 Oct).**
+
+Commit (steps 0 and 1 together):
+
+```
+git add src/uni_copilot/ntulearn_mcp/probe_content.py "docs/phase 4" docs/uni-copilot-project-plan.md
+git commit -m "feat(ntulearn): add live probe for course content endpoints"
+```
 
 ## Open items
 
