@@ -18,7 +18,9 @@ from uni_copilot.ntulearn_mcp.models import AnnouncementList
 TOOL_NAMES = {"login_status", "login", "list_courses", "upcoming_deadlines",
               "recent_announcements", "recent_messages",
               # Phase 4 (step 10): the read-only content tools
-              "list_course_content", "read_page", "read_file_text", "get_assessment"}
+              "list_course_content", "read_page", "read_file_text", "get_assessment",
+              # Phase 4 (step 13): local search, and saving one file (asks every time)
+              "search", "download_file"}
 
 
 # Runs an async MCP call from a normal test.
@@ -98,12 +100,13 @@ def test_login_status_signed_out(monkeypatch):
     assert "login" in result.structured_content["detail"]
 
 
-# .claude/settings.json allows exactly the read-only ntulearn tools that exist, and never `login`.
+# .claude/settings.json allows exactly the read-only ntulearn tools that exist, never `login`,
+# and never `download_file` (it saves a file on the PC, so Claude Code asks each time).
 # (Rules for other servers, like mcp__pilot__..., are checked by their own tests.)
 def test_permission_rules_match_tools():
     settings = json.loads((PROJECT_ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
     prefix = "mcp__ntulearn__"
     allowed = {rule.removeprefix(prefix) for rule in settings["permissions"]["allow"] if rule.startswith(prefix)}
-    assert allowed == TOOL_NAMES - {"login"}
+    assert allowed == TOOL_NAMES - {"login", "download_file"}
     mcp_json = json.loads((PROJECT_ROOT / ".mcp.json").read_text(encoding="utf-8"))
     assert mcp_json["mcpServers"]["ntulearn"]["args"] == ["run", "ntulearn-mcp"]

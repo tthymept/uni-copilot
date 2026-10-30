@@ -414,6 +414,12 @@ class SearchHit(_Model):
     page: int | None = Field(default=None, description="For files: the page or slide number.")
     event_id: str | None = Field(default=None, description="For announcements and messages: pass to pilot's get_event.")
     found_by: list[Literal["keyword", "meaning"]]
+    matched_words: list[str] = Field(
+        default_factory=list, description="Which of the search words this hit contains (a word also finds "
+                                          "its other forms: 'rotations' finds 'rotation').")
+    also_in: list[str] = Field(
+        default_factory=list, description=UNTRUSTED + " Other places with exactly the same text (course code "
+                                          "and title), e.g. the same file attached several times.")
     url: str
 
 

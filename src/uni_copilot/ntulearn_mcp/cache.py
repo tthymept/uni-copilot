@@ -455,7 +455,8 @@ class ContentCache:
     # What search covers, for its coverage line: course codes with a cached
     # tree, pages, files read, posts copied, and files KNOWN (readable file
     # items and embedded files with a link, from the trees), so an answer can
-    # say "120 of 230 files read".
+    # say "120 of 230 files read". Both file counts only count names ending
+    # in `readable_extensions` (search leaves data files like .csv out).
     def coverage_counts(self, readable_extensions: set[str]) -> dict[str, Any]:
         with self._connect() as conn:
             codes = {r["course_code"] for r in conn.execute("SELECT DISTINCT course_code FROM courses")}
@@ -466,7 +467,8 @@ class ContentCache:
                 names += [f["name"] for f in item.get("embedded_files") or [] if f.get("has_link")]
                 known += sum(1 for n in names if Path(n.lower()).suffix in readable_extensions)
             pages = conn.execute("SELECT COUNT(*) FROM pages").fetchone()[0]
-            files = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+            files = sum(1 for r in conn.execute("SELECT file_name FROM files")
+                        if Path(r["file_name"].lower()).suffix in readable_extensions)
             posts = conn.execute(
                 "SELECT COUNT(*) FROM search_text WHERE source IN ('announcement', 'message')").fetchone()[0]
         return {"codes": codes, "pages": pages, "files": files, "files_known": known, "posts": posts}

@@ -15,7 +15,17 @@ How:
     "rotation"); results are ranked with BM25 (more matches in a shorter
     text rank higher; a match in the title counts 5 times as much).
   - All words must match first; if that finds nothing, any word may match
-    (and the result says so).
+    (and the result says so). Then rows with MORE of the words come first,
+    BM25 only orders rows with as many words; each hit lists its
+    matched_words. (Without this, a rare word alone outranks a page with
+    the common word: "AVL rotation" put another course's "rotation" page
+    above the AVL slides, 30 Oct.) Very common words ("what", "is", "the")
+    are left out of the query unless it has nothing else.
+  - Copies are merged: the same text in several places (one file attached
+    to 10 items, an announcement posted to two course sites) becomes one
+    hit with `also_in` listing the other places.
+  - Data files (.csv) are left out of search: their text is rows of numbers.
+    The indexer doesn't read them; read_file_text still can.
   - Your words are never passed to FTS5 as they are: each becomes a quoted
     term, so characters like - : " * or the words AND / OR / NEAR can't change
     the query's meaning or break it.
@@ -49,38 +59,85 @@ STORE_PATH = DATA_DIR / "uni-copilot.sqlite"
 # Its "last successful sync" notes for posts: when either changes, re-copy.
 STORE_MARKER_KEYS = ("last_sync:ntulearn_announcement", "last_sync:ntulearn_message")
 READABLE_EXTENSIONS = {".pdf", ".pptx", ".ipynb", *TEXT_EXTENSIONS}
+# Raw data, not reading: the indexer skips these and search leaves them out.
+DATA_EXTENSIONS = {".csv"}
+INDEXED_EXTENSIONS = READABLE_EXTENSIONS - DATA_EXTENSIONS
 MAX_HITS = 30
+MAX_WORDS = 12          # words used from one query (each costs one extra lookup)
+MAX_ALSO_IN = 5         # places listed in a hit's also_in
 TITLE_WEIGHT = 5.0      # a match in a title counts this many times a match in the text
 SNIPPET_WORDS = 14
 WORD_RE = re.compile(r"\w+", re.UNICODE)
 MATCH_START, MATCH_END = "\x02", "\x03"   # FTS5 marks matches with these first
 NO_MEANING_YET = "Meaning search isn't built yet (Phase 4 steps 14-17); these are keyword results."
+# Question words and glue: they match almost every row, so they'd decide the
+# "most words matched" order without saying anything about the topic.
+STOP_WORDS = {
+    "a", "an", "and", "are", "about", "as", "at", "be", "by", "can", "do", "does", "for", "from", "how",
+    "i", "in", "is", "it", "me", "my", "of", "on", "or", "the", "this", "that", "to", "was", "what",
+    "when", "where", "which", "who", "why", "with",
+}
 
 
-# Turns the user's words into two safe FTS5 queries: all words ("a" "b" =
-# both must appear) and any word ("a" OR "b"). Each word is quoted, so
-# nothing in it is read as FTS5 syntax. Raises ValueError if there are no words.
-def match_queries(query: str) -> tuple[str, str]:
-    words = [w for w in WORD_RE.findall(query.lower()) if len(w) > 1 or w.isdigit()]
+# The user's words to search for: lowercase, no repeats, no one-letter words
+# (except digits), common words left out unless nothing else is left, at most
+# MAX_WORDS. Raises ValueError if there are no words.
+def query_words(query: str) -> list[str]:
+    words = list(dict.fromkeys(w for w in WORD_RE.findall(query.lower()) if len(w) > 1 or w.isdigit()))
     if not words:
         raise ValueError("Give some words to search for.")
-    quoted = [f'"{w}"' for w in dict.fromkeys(words)]   # dict: drop repeats, keep order
+    return ([w for w in words if w not in STOP_WORDS] or words)[:MAX_WORDS]
+
+
+# One word as a safe FTS5 query: quoted, so nothing in it is read as FTS5
+# syntax (- : * AND OR NEAR ...).
+def _quoted(word: str) -> str:
+    return '"' + word.replace('"', "") + '"'
+
+
+# The two FTS5 queries for a list of words: all words ("a" "b" = both must
+# appear) and any word ("a" OR "b").
+def match_queries(words: list[str]) -> tuple[str, str]:
+    quoted = [_quoted(w) for w in words]
     return " ".join(quoted), " OR ".join(quoted)
+
+
+# The key under which rows count as copies of each other: same kind of hit
+# and same text (and, for posts and titles, the same title; for files, the
+# same page number). Two files with the same text are copies whatever their names.
+def _copy_key(row) -> tuple:
+    if row["source"] == "file":
+        return ("file", row["page"], row["body"])
+    return (row["source"], row["title"], row["body"])
+
+
+# Merges copies: keeps the first (best) row of each group and remembers the
+# others' "COURSE title" as its also_in. Returns [(row, also_in)].
+def _merge_copies(rows: list) -> list[tuple]:
+    groups: dict[tuple, tuple] = {}
+    for row in rows:
+        key = _copy_key(row)
+        if key in groups:
+            groups[key][1].append(f"{row['course_code'] or ''} {row['title'] or ''}".strip())
+        else:
+            groups[key] = (row, [])
+    return list(groups.values())
 
 
 # Mixes kinds of hit: rows come best first; no single source (title, file,
 # page, announcement, message) may take more than half of `limit`, unless
 # nothing else matched. Without this, short title rows (weighted 5x) can
 # crowd out the posts and pages that say something about the words.
-def _varied(rows: list, limit: int) -> list:
+def _varied(rows: list[tuple], limit: int) -> list[tuple]:
     cap = max(1, (limit + 1) // 2)
     picked, held, per_source = [], [], {}
-    for row in rows:
-        if per_source.get(row["source"], 0) < cap:
-            picked.append(row)
-            per_source[row["source"]] = per_source.get(row["source"], 0) + 1
+    for pair in rows:                      # (row, also_in) from _merge_copies
+        source = pair[0]["source"]
+        if per_source.get(source, 0) < cap:
+            picked.append(pair)
+            per_source[source] = per_source.get(source, 0) + 1
         else:
-            held.append(row)
+            held.append(pair)
         if len(picked) == limit:
             return picked
     return picked + held[:limit - len(picked)]
@@ -103,12 +160,14 @@ class KeywordSearch:
         self.refresh_posts(notes)
         codes = self._known_codes()
         course_code = self._pick_code(course, codes) if course else None
-        all_words, any_word = match_queries(query)
-        hits = self._run(all_words, course_code, sources, limit)
-        if not hits:
-            hits = self._run(any_word, course_code, sources, limit)
+        words = query_words(query)
+        all_words, any_word = match_queries(words)
+        hits = self._run(all_words, words, course_code, sources, limit, every_word=True)
+        if not hits and len(words) > 1:
+            hits = self._run(any_word, words, course_code, sources, limit, every_word=False)
             if hits:
-                notes.append("No result had all the words; these match some of them.")
+                notes.append("No result had all the words; these match some of them, most words first "
+                             "(see matched_words).")
         return SearchResults(query=query, search_mode="keyword_only", mode_reason=NO_MEANING_YET,
                              hits=hits, coverage=self.coverage(codes), notes=notes)
 
@@ -161,32 +220,47 @@ class KeywordSearch:
 
     # ----- Querying -----
 
-    # One FTS5 query: matching rows, best first (BM25 with titles weighted),
-    # filtered by course and source, each turned into a SearchHit with a
-    # snippet (matched words in **bold**) from the text, or from the title
-    # when only the title matched. FTS5 marks matches with two invisible
-    # characters first (char 2 and 3), so we can tell whether the text or
-    # only the title matched, then they become ** (plain ASCII, fine on
-    # Telegram and in any console).
-    def _run(self, match: str, course_code: str | None, sources: list[str] | None, limit: int) -> list[SearchHit]:
-        sql = ("SELECT source, title, course_code, site_id, content_id, file_ref, page, event_id, "
+    # One FTS5 query: matching rows, best first, filtered by course and
+    # source, copies merged, each turned into a SearchHit with a snippet
+    # (matched words in **bold**) from the text, or from the title when only
+    # the title matched.
+    #   Order: rows with more of the words first (every_word=False only; with
+    #   every_word=True all rows have them all), then BM25 with titles weighted.
+    #   Which words a row has: one small lookup per word,
+    #   "rowid IN (rows matching that word)", worked out once per query.
+    #   Snippets: FTS5 marks matches with two invisible characters first
+    #   (char 2 and 3), so we can tell whether the text or only the title
+    #   matched, then they become ** (plain ASCII, fine on Telegram and in
+    #   any console).
+    def _run(self, match: str, words: list[str], course_code: str | None, sources: list[str] | None,
+             limit: int, every_word: bool) -> list[SearchHit]:
+        has_word = "" if every_word else "".join(
+            f", rowid IN (SELECT rowid FROM search_text WHERE search_text MATCH ?) AS w{i}" for i in range(len(words)))
+        sql = ("SELECT source, title, body, course_code, site_id, content_id, file_ref, page, event_id, "
                f"snippet(search_text, 1, char(2), char(3), '...', {SNIPPET_WORDS}) AS body_snip, "
-               f"snippet(search_text, 0, char(2), char(3), '...', {SNIPPET_WORDS}) AS title_snip "
-               "FROM search_text WHERE search_text MATCH ?")
-        params: list = [match]
+               f"snippet(search_text, 0, char(2), char(3), '...', {SNIPPET_WORDS}) AS title_snip"
+               f"{has_word} FROM search_text WHERE search_text MATCH ?"
+               " AND NOT (source = 'file' AND (" + " OR ".join("lower(title) LIKE ?" for _ in DATA_EXTENSIONS) + "))")
+        params: list = ([] if every_word else [_quoted(w) for w in words]) + [match]
+        params += [f"%{ext}" for ext in sorted(DATA_EXTENSIONS)]
         if course_code:
             sql += " AND course_code = ?"
             params.append(course_code)
         if sources:
             sql += f" AND source IN ({','.join('?' * len(sources))})"
             params += list(sources)
-        sql += f" ORDER BY bm25(search_text, {TITLE_WEIGHT}, 1.0) LIMIT ?"
-        params.append(limit * 4)   # more than needed, so _varied can mix kinds
+        most_words = "" if every_word else "(" + " + ".join(f"w{i}" for i in range(len(words))) + ") DESC, "
+        sql += f" ORDER BY {most_words}bm25(search_text, {TITLE_WEIGHT}, 1.0) LIMIT ?"
+        params.append(limit * 8)   # more than needed: copies merge, and _varied mixes kinds
         with self._cache._connect() as conn:
-            rows = _varied(conn.execute(sql, params).fetchall(), limit)
-        urls = self._post_urls([r["event_id"] for r in rows if r["event_id"]])
+            rows = _varied(_merge_copies(conn.execute(sql, params).fetchall()), limit)
+        urls = self._post_urls([r["event_id"] for r, _ in rows if r["event_id"]])
         hits = []
-        for r in rows:
+        for r, also_in in rows:
+            matched = words if every_word else [w for i, w in enumerate(words) if r[f"w{i}"]]
+            others = list(dict.fromkeys(also_in))
+            if len(others) > MAX_ALSO_IN:
+                others = others[:MAX_ALSO_IN] + [f"and {len(others) - MAX_ALSO_IN} more"]
             body_snip, title_snip = r["body_snip"] or "", r["title_snip"] or ""
             snippet = body_snip if MATCH_START in body_snip else title_snip
             snippet = snippet.replace(MATCH_START, "**").replace(MATCH_END, "**")
@@ -200,7 +274,7 @@ class KeywordSearch:
                 source=r["source"], course_code=r["course_code"] or "", title=r["title"] or "",
                 snippet=" ".join(snippet.split()), content_id=r["content_id"], file_ref=r["file_ref"],
                 page=int(r["page"]) if r["page"] is not None else None, event_id=r["event_id"],
-                found_by=["keyword"], url=url,
+                found_by=["keyword"], matched_words=matched, also_in=others, url=url,
             ))
         return hits
 
@@ -208,7 +282,7 @@ class KeywordSearch:
 
     # Every course code the cache or the event store knows (no NTULearn call).
     def _known_codes(self) -> set[str]:
-        codes = set(self._cache.coverage_counts(READABLE_EXTENSIONS)["codes"])
+        codes = set(self._cache.coverage_counts(INDEXED_EXTENSIONS)["codes"])
         try:
             store = sqlite3.connect(f"file:{self._store_path.as_posix()}?mode=ro", uri=True, timeout=5)
             try:
@@ -234,7 +308,7 @@ class KeywordSearch:
 
     # How much the index covers, for every answer.
     def coverage(self, codes: set[str] | None = None) -> SearchCoverage:
-        counts = self._cache.coverage_counts(READABLE_EXTENSIONS)
+        counts = self._cache.coverage_counts(INDEXED_EXTENSIONS)
         codes = codes if codes is not None else self._known_codes()
         return SearchCoverage(
             courses_indexed=len(counts["codes"]), courses_total=max(len(codes), len(counts["codes"])),
@@ -264,7 +338,8 @@ def _main() -> None:
         print(f"coverage: {c.courses_indexed} of {c.courses_total} courses with a cached tree, {c.pages} pages, "
               f"{c.files} of {c.files_known} known files read, {c.posts} posts; notes: {result.notes or 'none'}")
         for h in result.hits:
-            print(f"   {h.source:12} {h.course_code:7} page={h.page} snippet {len(h.snippet)} characters")
+            print(f"   {h.source:12} {h.course_code:7} page={h.page} matched={h.matched_words} "
+                  f"copies={len(h.also_in)} snippet {len(h.snippet)} characters")
         return
 
     now = datetime(2026, 10, 30, 2, 0, tzinfo=timezone.utc)
@@ -309,6 +384,27 @@ def _main() -> None:
                 search.search(bad[0], course=bad[1])
             except ValueError as e:
                 print(f"8) {bad!r}: {e}")
+
+        # The step 13 fixes: most words first, copies merged, data files left out.
+        zoo = ContentItem(id="_20_1", course_code="YY2000", course_site_id="_2_1", title="Zoo",
+                          kind="file", release=Release(state="open"), file_name="zoo.pdf")
+        copy = item.model_copy(update={"id": "_11_1", "file_name": "avl (copy).pdf", "title": "AVL again"})
+        data = item.model_copy(update={"id": "_12_1", "file_name": "data.csv", "title": "Data"})
+        cache.save_tree("_1_1", "XX1000", [item, copy, data], now)
+        cache.save_tree("_2_1", "YY2000", [zoo], now)
+        cache.save_file_text("_2_1", "YY2000", "_20_1", "_88_1", "zoo.pdf", "pdf", ["A penguin."], None, now)
+        cache.save_file_text("_1_1", "XX1000", "_11_1", "_78_1", "avl (copy).pdf", "pdf",
+                             ["AVL trees", "A rotation keeps the tree balanced.", "Insertion and rotations"], None, now)
+        cache.save_file_text("_1_1", "XX1000", "_12_1", "_79_1", "data.csv", "text", ["balanced,1,2"], None, now)
+        r = search.search("AVL trees penguin")
+        print("9) 'AVL trees penguin' (no row has all 3; the rare 'penguin' row alone must not lead):")
+        for h in r.hits:
+            print(f"   {h.source:6} {h.course_code} page={h.page} matched={h.matched_words}")
+        r = search.search("balanced")
+        print(f"10) 'balanced': {[(h.title, h.page, h.also_in) for h in r.hits]} (one hit for the copy, no csv)")
+        print(f"11) coverage leaves the csv out: files {r.coverage.files} of {r.coverage.files_known} known")
+        print(f"12) words of 'What is a rotation?': {query_words('What is a rotation?')}; "
+              f"of 'what is it': {query_words('what is it')}")
 
 
 if __name__ == "__main__":

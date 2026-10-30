@@ -12,7 +12,9 @@ In plain words, per course:
      titles and page text, removes what NTULearn removed, and notices
      replaced files (contents.py + cache.py).
   2. List the readable files: file items and files embedded in pages that
-     are PDF, PPTX, notebooks or text, and that have a download link.
+     are PDF, PPTX, notebooks or text, and that have a download link. Data
+     files (.csv) are left out: rows of numbers, not reading (read_file_text
+     still reads one on request).
   3. Skip each one whose text is already cached for its current version
      (checked locally, no request). Read the others: download into memory,
      extract the text, save it, drop the bytes (ContentsClient.file_pages).
@@ -50,7 +52,7 @@ from uni_copilot.ntulearn_mcp.client.courses import CoursesClient
 from uni_copilot.ntulearn_mcp.client.http import NtuLearnError, NtuLearnHttp
 from uni_copilot.ntulearn_mcp.config import INDEX_LOCK, INDEXER_INTERVAL_S, load_settings
 from uni_copilot.ntulearn_mcp.models import ContentItem
-from uni_copilot.ntulearn_mcp.search import READABLE_EXTENSIONS, KeywordSearch
+from uni_copilot.ntulearn_mcp.search import INDEXED_EXTENSIONS, KeywordSearch
 
 # Rough cost of reading one file, for the --dry-run estimate: a file item
 # takes ~4 requests (attachments list + 3 download hops), an embedded file ~4
@@ -83,14 +85,14 @@ class RunReport:
 
 # The readable files in one course's items: file items with a readable
 # extension, and embedded files (with a download link) in pages. Videos,
-# zips, images and other types are left out.
+# zips, images, data files (.csv) and other types are left out.
 def readable_files(items: list[ContentItem]) -> list[FileJob]:
     jobs = []
     for item in items:
-        if item.kind == "file" and PurePosixPath((item.file_name or "").lower()).suffix in READABLE_EXTENSIONS:
+        if item.kind == "file" and PurePosixPath((item.file_name or "").lower()).suffix in INDEXED_EXTENSIONS:
             jobs.append(FileJob(item.course_site_id, item.course_code, item, None, item.file_name or ""))
         for emb in item.embedded_files:
-            if emb.has_link and PurePosixPath(emb.name.lower()).suffix in READABLE_EXTENSIONS:
+            if emb.has_link and PurePosixPath(emb.name.lower()).suffix in INDEXED_EXTENSIONS:
                 jobs.append(FileJob(item.course_site_id, item.course_code, item, emb.xid, emb.name))
     return jobs
 

@@ -801,6 +801,58 @@ git add src/uni_copilot/ntulearn_mcp/indexer.py src/uni_copilot/ntulearn_mcp/cac
 git commit -m "feat(ntulearn): add indexer that reads every course's files into search"
 ```
 
+## Step 13: `search` and `download_file` tools (plus the three fixes from step 12)
+
+Your OK (30 Oct, "next"): a, b and c from step 12.
+
+**13a. `search.py`, the three fixes:**
+
+- **Most words first (a):** when no row has all the words, rows with **more** of them come first; BM25 only orders rows with the same number. How: one extra column per word, `rowid IN (rows matching that word)`, and `ORDER BY (w0 + w1 + ...) DESC, bm25(...)`. Every hit now has **`matched_words`**, so Claude (and you) can see a weak hit. Very common words ("what", "is", "the"...) are left out of a query unless nothing else is left, so "what is an AVL rotation" searches `avl rotation`; at most 12 words.
+- **Copies merged (b):** rows with exactly the same text (files: same page number and text; pages, posts and titles: same title and text) become one hit, with **`also_in`** listing the others as "COURSE title" (at most 5, then "and N more"). Search fetches 8× the limit first, so merging doesn't leave too few. Embeddings will do the same per distinct text (steps 15, 17).
+- **`.csv` left out (c):** `DATA_EXTENSIONS = {".csv"}`, `INDEXED_EXTENSIONS` = readable minus data. Search leaves csv file pages out (by file name), and coverage counts only indexed types, so the csv text already in your cache simply stops showing (no clean-up needed). `read_file_text` still reads a csv on request.
+
+**13b. `indexer.py`:** lists files by `INDEXED_EXTENSIONS`, so it no longer reads csv files.
+
+**13c. `cache.py`:** `coverage_counts` counts read files by extension too (so "files read" can't exceed "files known").
+
+**13d. `models.py`:** `SearchHit` gains `matched_words` and `also_in` (untrusted: other people's titles).
+
+**13e. `server.py`, two tools:**
+
+- **`search(query, course, sources, limit)`:** local, instant, never contacts NTULearn. Annotated read-only and **closed world** (`open_world_hint=False`: it only reads this PC's cache). The server instructions tell Claude to search first for "where is X explained?", then read just that page with `read_file_text(..., pages="<page>")`, to use key words, to check `matched_words` when not every word matched, and to state coverage.
+- **`download_file(course, content_id, file_ref)`:** saves one file with step 9's `save_file`: `~/Downloads/uni-copilot/<COURSE>/` (or `UNI_COPILOT_DOWNLOAD_DIR`), cleaned name, never overwrites, no videos, ≤ 200 MB, Mark of the Web, never opened. Annotated read-only on NTULearn (the project rule) but **not idempotent** (each call saves another copy) and not destructive. The folder can't be chosen by Claude.
+
+**13f. `.claude/settings.json`:** `mcp__ntulearn__search` pre-allowed. `download_file` is **not**, so Claude Code asks you each time (step 18's part about search, done now). **13g. `tests/test_server.py`:** the tool list has 12 tools; the settings guard now says "every tool except `login` and `download_file`". **13h. `docs/how-it-runs.md`:** a short "5. The content indexer" section (by hand, not scheduled), since step 12 added something you run.
+
+**New ideas:**
+
+- **Annotations are hints, permissions decide:** `read_only_hint`, `idempotent_hint` and `open_world_hint` describe a tool to the client; whether Claude Code asks you is decided by `.claude/settings.json` (allow list) and the Telegram session's deny list (step 19).
+- **Stop words:** words so common they say nothing about the topic; left out of keyword queries.
+
+Checks (30 Oct, offline): search's self-test, new checks 9-12: "AVL trees penguin" puts rows with 2 words first and the rare "penguin" row after them; a copied file gives one hit with `also_in`; the csv is left out of hits and coverage; "What is a rotation?" → `['rotation']`. In-process: both tools listed with the right annotations; `search(course="2108")` works; bad words, unknown course and `limit=99` give readable errors. `uv run pytest` → 186 passed, 4 skipped.
+
+On your real cache (counts only): "AVL rotation" still lists IE2110 page 43 first. Every hit has just one of the two words, so "most words first" can't help, and BM25 favours the rarer word; `matched_words` now shows this (`['rotation']` vs `['avl']`), and the instructions tell Claude to say so. Meaning search is the real fix (steps 14-17). "dijkstra shortest path": all 3 words on every hit. "pokemon": copies merged (`copies=1` on most hits). Coverage now **333 of 338** known files (the csv files left out).
+
+Check (PowerShell). First restart the servers so Claude Code sees the new tools: `/mcp` → reconnect `ntulearn` (or restart this session). Then:
+
+```
+uv run python -m uni_copilot.ntulearn_mcp.search
+uv run python -m uni_copilot.ntulearn_mcp.search --real "AVL rotation"
+uv run python -m uni_copilot.ntulearn_mcp.server --self-test
+uv run pytest
+```
+
+The self-test now lists 12 tools and adds line 8 (`search('lecture')`, with coverage) and line 9 (the error for "!!").
+
+**Your check (30 Oct, 12:31):** search self-test 1–12 as above; `--real "AVL rotation"` the same as mine (333 of 338 files; IE2110 `['rotation']` first, then IE2108 `['avl']`); server self-test: 12 tools, `search` and `download_file` listed, line 8 `search('lecture')` → 5 hits, keyword_only, files 333 of 338; line 9 the plain error for "!!". (Line 7's unknown id refetched CC0006's tree once before answering, as `_find` does.) Still to do: the two questions in Claude Code (search → read_file_text without a prompt; `download_file` asking first and the Mark of the Web). Then in Claude Code: ask "Which IE2108 lecture explains Dijkstra?" (should use `search`, then `read_file_text` on that page, no prompt) and "Download the IE2108 week 11 slides" (Claude Code asks before `download_file`; the file lands in `Downloads\uni-copilot\IE2108\`; right-click → Properties shows the "came from another computer" note, the Mark of the Web).
+
+Commit:
+
+```
+git add src/uni_copilot/ntulearn_mcp tests/test_server.py .claude/settings.json docs
+git commit -m "feat(ntulearn): add search and download_file tools"
+```
+
 ## Open items
 
 Everything not yet verified in Phase 4. Updated as steps finish.
@@ -823,4 +875,6 @@ Everything not yet verified in Phase 4. Updated as steps finish.
 - **Dependency / lock file:** a package the project needs, listed in `pyproject.toml` with a minimum version; `uv.lock` writes down the exact version of it and of everything it needs in turn, so installs are the same every time.
 - **Transitive dependency:** a package pulled in because another package needs it (lxml, pillow, xlsxwriter for python-pptx).
 - **Hardlink:** a second name for the same file on disk; impossible across drives, so uv copies instead.
+- **Stop words:** very common words ("what", "is", "the") left out of a keyword query because they match nearly everything.
+- **Tool annotations:** hints a tool gives the client (read-only, idempotent = safe to repeat, open world = reaches outside the PC); permissions in `.claude/settings.json` decide what's asked.
 - **Graceful degradation:** when one part is unavailable, fall back to something that still works (keyword-only search) and say so, instead of failing.

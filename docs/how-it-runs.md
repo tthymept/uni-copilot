@@ -1,6 +1,6 @@
 # How uni-copilot runs: what happens when, and when the PC is off
 
-Status: 29 Oct 2026 (Phase 3, during the test week). All times are Singapore time (the PC's clock).
+Status: 30 Oct 2026 (Phase 3 test week; Phase 4 indexer added, run by hand). All times are Singapore time (the PC's clock).
 
 ## The short version
 
@@ -49,6 +49,13 @@ Status: 29 Oct 2026 (Phase 3, during the test week). All times are Singapore tim
 - **Runs:** only while the window from `scripts\start-telegram.ps1` is open. Restart it about once a day.
 - **Closed?** Messages you send wait at Telegram for up to 24 hours and are answered when you start it again.
 - Locked to study questions: no shell, files, web or sign-in from Telegram.
+
+### 5. The content indexer (Phase 4, by hand, not scheduled)
+
+- **Runs:** only when you start it: `uv run python -m uni_copilot.ntulearn_mcp.indexer` (`--dry-run` first shows what it would read and how long). It reads every course's slides, PDFs, notebooks and text files into `.data\cache\content.sqlite`, which `search` uses. Data files (`.csv`) are left out.
+- **First run** ~1 hour (1 request every 2 s); later runs only read what's new or changed, usually a few minutes. Safe to stop with Ctrl+C or to sleep the laptop: everything read is kept, and the next run carries on.
+- **Not run?** Search still works on what was read before; its answers say how many files are covered and when the indexer last finished. Files you open with `read_file_text` are added on the way.
+- Whether to schedule it (poke often, decide in code) is decided after the test week.
 
 ## A normal day with the PC on all day
 
