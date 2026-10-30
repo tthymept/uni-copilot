@@ -829,6 +829,8 @@ Your OK (30 Oct, "next"): a, b and c from step 12.
 - **Annotations are hints, permissions decide:** `read_only_hint`, `idempotent_hint` and `open_world_hint` describe a tool to the client; whether Claude Code asks you is decided by `.claude/settings.json` (allow list) and the Telegram session's deny list (step 19).
 - **Chunking:** cutting text into pieces small enough for one vector each, overlapping so nothing is lost at a cut.
 - **Normalizing:** scaling a vector to length 1, so cosine similarity is a plain dot product.
+- **Schema migration:** a numbered change to a database's tables, applied once to an existing file.
+- **Content-addressed storage:** storing something under the hash of its content, so identical content is stored once.
 - **Stop words:** words so common they say nothing about the topic; left out of keyword queries.
 
 Checks (30 Oct, offline): search's self-test, new checks 9-12: "AVL trees penguin" puts rows with 2 words first and the rare "penguin" row after them; a copied file gives one hit with `also_in`; the csv is left out of hits and coverage; "What is a rotation?" → `['rotation']`. In-process: both tools listed with the right annotations; `search(course="2108")` works; bad words, unknown course and `limit=99` give readable errors. `uv run pytest` → 186 passed, 4 skipped.
@@ -899,6 +901,39 @@ git add src/uni_copilot/ntulearn_mcp/embeddings.py src/uni_copilot/ntulearn_mcp/
 git commit -m "feat(ntulearn): add chunking and gemini embeddings with limit handling"
 ```
 
+## Step 15: cache.py (chunks and vectors)
+
+**Fix to step 14 first (30 Oct, from your `--check`):** Gemini answered vectors of **3,072** numbers, not 768: it silently ignored the `embedContentConfig` object (so probably the task type too). Changed to the top-level fields (`taskType`, `outputDimensionality`, `title`), which the docs call deprecated but which work: the rerun (by me, 2 requests, the same made-up sentences) gave **768** everywhere, similarity of "AVL rotation" to the AVL sentence 0.698, Dijkstra 0.498, canteen 0.475. Every answer's vector size is now checked (`_vector`): a wrong size stops with a plain "service" reason instead of storing vectors that can't be compared. Also: `text_hash` is now the hash of the text only (not the title), because copies of a file often have different names ("avl (copy).pdf"); the vector is made with the first copy's title.
+
+**`cache.py`, migration 2** (the real cache is upgraded when it's next opened; the first two tables' rows are untouched):
+
+- **`chunks`**: one row per piece (course, site, content id, file_ref or '' for a page, page/slide number, part, title, text, `text_hash`), indexed by `text_hash`.
+- **`vectors`**: one row per **distinct text and model**: `text_hash`, `model_id` (`gemini-embedding-001@768`), the vector as 768 float32 numbers in a BLOB (3 KB), when it was made. Copies share one row, so each text is embedded once.
+- **Chunks follow the text:** `save_file_text` and `save_page` remake the chunks of that file or page (data files get none); `_forget_file` / `_forget_item` delete them. Vectors stay keyed by hash, so a file read again with the same text keeps its vectors (no new Gemini request).
+- **New methods:** `fill_missing_chunks()` (chunks for text cached before this step; local), `pending_chunks(model_id, limit)` (one per distinct text still without a vector: what step 17 sends), `save_vectors()` (after every batch, so a stop keeps them), `vector_matrix(model_id)` (all vectors as one numpy matrix, for step 16: one multiplication gives every chunk's similarity), `chunks_by_hash()` (where each text is, copies included: search's `also_in`), `embedding_counts()` (search's coverage "chunks_with_meaning of chunks_total"), `prune_vectors()` (drops vectors no chunk uses, or from another model). `stats()` counts chunks, distinct texts and vectors.
+- **`config.py`:** `DATA_EXTENSIONS` moved here (search, cache and the indexer all need it; `search.py` imports it).
+
+**New ideas:**
+
+- **Schema migration:** a numbered change to the database's tables, applied once to an existing file (`PRAGMA user_version` 1 → 2), so your cached text isn't thrown away.
+- **Content-addressed storage:** storing something under the hash of its content, so identical content is stored (and paid for) once.
+- **BLOB:** raw bytes in a database column; here 768 float32 numbers = 3,072 bytes.
+
+Checks (30 Oct, offline): two copies of a 3-page file + a csv → 6 chunks, **3 distinct texts** (short page dropped, long page cut in 2, csv none); 3 to embed; after 2 vectors, 1 left, matrix 2×4, the first text found in both copies; saving the same text again keeps the vectors; removing the copy keeps the shared vectors, removing the original too lets `prune_vectors` drop them; a version-1 cache reopened becomes version 2 and `fill_missing_chunks` fills it once. Embeddings self-test still passes. `uv run pytest` → 186 passed, 4 skipped.
+
+**Your real cache (30 Oct, `--real --fill-chunks`, by me, local only):** schema version 2; **5,170 chunks, 4,808 distinct texts**, 0 vectors. At 50 per request that's ~97 requests if a batch counts as one request toward the 1,000 a day, or ~4,808 (about 5 days) if each text counts. Step 17's first run tells which.
+
+**Your check (30 Oct):** `/mcp` reconnected; cache self-test 1–12 as above (3 distinct texts, vectors kept, prune, migration); `--real`: schema version 2, 5,170 chunks, 4,808 distinct texts, 0 vectors; embeddings self-test 1–7 incl. the new "wrong vector size" case.
+
+Check (PowerShell). First `/mcp` → reconnect `ntulearn` (the running server still has the old cache code: until then, a file it reads gets no chunks; `fill_missing_chunks` catches up later):
+
+```
+uv run python -m uni_copilot.ntulearn_mcp.cache
+uv run python -m uni_copilot.ntulearn_mcp.cache --real
+uv run python -m uni_copilot.ntulearn_mcp.embeddings
+uv run pytest
+```
+
 ## Open items
 
 Everything not yet verified in Phase 4. Updated as steps finish.
@@ -909,7 +944,7 @@ Everything not yet verified in Phase 4. Updated as steps finish.
 
 - **All of "Things to check" in `phase-4-core.md`:** the probe (step 1) answers the NTULearn ones; the Gemini ones are checked in steps 14 and 17.
 - **Resolved (30 Oct, step 14):** Gemini's free-tier data terms re-read; you chose the free tier for course content (billing stays the switch).
-- **Gemini, not verified until `--check` and step 17:** the 429 answer's exact shape, how a batch counts toward 1,000 requests a day, whether `embedContentConfig` is accepted in batches.
+- **Gemini, not verified until step 17:** the 429 answer's exact shape, how a batch counts toward 1,000 requests a day. (Resolved 30 Oct: `embedContentConfig` is ignored; top-level fields work.)
 - **Telegram tool list:** new `ntulearn` tools appear in the locked Telegram session by themselves (the lock limits only built-in tools). Until steps 18–19, a new tool there would wait for a click at the PC.
 
 ## Concepts

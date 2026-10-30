@@ -50,7 +50,7 @@ import sqlite3
 from pathlib import Path
 
 from uni_copilot.ntulearn_mcp.cache import ContentCache, time_from_db
-from uni_copilot.ntulearn_mcp.config import DATA_DIR
+from uni_copilot.ntulearn_mcp.config import DATA_DIR, DATA_EXTENSIONS
 from uni_copilot.ntulearn_mcp.models import SearchCoverage, SearchHit, SearchResults, SearchSource, course_url
 from uni_copilot.ntulearn_mcp.parsers.files import TEXT_EXTENSIONS
 
@@ -59,8 +59,6 @@ STORE_PATH = DATA_DIR / "uni-copilot.sqlite"
 # Its "last successful sync" notes for posts: when either changes, re-copy.
 STORE_MARKER_KEYS = ("last_sync:ntulearn_announcement", "last_sync:ntulearn_message")
 READABLE_EXTENSIONS = {".pdf", ".pptx", ".ipynb", *TEXT_EXTENSIONS}
-# Raw data, not reading: the indexer skips these and search leaves them out.
-DATA_EXTENSIONS = {".csv"}
 INDEXED_EXTENSIONS = READABLE_EXTENSIONS - DATA_EXTENSIONS
 MAX_HITS = 30
 MAX_WORDS = 12          # words used from one query (each costs one extra lookup)

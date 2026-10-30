@@ -39,6 +39,15 @@ Tables:
   search_text  FTS5 full-text table: titles, page text, file pages (and,
                from step 11, announcements and messages)
   state        small key -> value notes (e.g. when the indexer last finished)
+  chunks       (step 15) the pieces of page and file text that meaning search
+               compares, each with where it is and a hash of its text
+  vectors      (step 15) one vector per distinct text hash and model: copies
+               of a file share one vector, so each text is embedded once
+
+Chunks follow the text: saving a file's or page's text remakes its chunks,
+forgetting it removes them. Vectors stay keyed by text hash, so a file
+read again with the same text keeps its vectors (no new Gemini request);
+prune_vectors() drops vectors no chunk uses any more, or from another model.
 """
 
 import argparse
@@ -52,7 +61,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from uni_copilot.ntulearn_mcp.config import CONTENT_DB, CONTENT_FRESH_S
+import numpy as np
+
+from uni_copilot.ntulearn_mcp.config import CONTENT_DB, CONTENT_FRESH_S, DATA_EXTENSIONS
+from uni_copilot.ntulearn_mcp.embeddings import Chunk, file_chunks, page_chunks
 from uni_copilot.ntulearn_mcp.models import ContentItem, FileType, Link
 from uni_copilot.ntulearn_mcp.parsers.content import is_signed_file_link
 
@@ -126,6 +138,31 @@ MIGRATIONS: list[str] = [
     CREATE TABLE state (
         key   TEXT PRIMARY KEY,
         value TEXT NOT NULL
+    );
+    """,
+    # Version 2 (Phase 4 step 15): meaning search. Existing files and pages
+    # get their chunks from fill_missing_chunks() (the indexer calls it).
+    """
+    CREATE TABLE chunks (
+        site_id     TEXT NOT NULL,
+        content_id  TEXT NOT NULL,
+        file_ref    TEXT NOT NULL,             -- '' for a course page
+        page        INTEGER NOT NULL,          -- page / slide number; 0 for a course page
+        part        INTEGER NOT NULL,          -- 1, 2, ... when a long page is cut
+        source      TEXT NOT NULL,             -- file / page
+        course_code TEXT NOT NULL,
+        title       TEXT NOT NULL,             -- UNTRUSTED
+        text        TEXT NOT NULL,             -- UNTRUSTED
+        text_hash   TEXT NOT NULL,
+        PRIMARY KEY (site_id, content_id, file_ref, page, part)
+    );
+    CREATE INDEX chunks_hash ON chunks (text_hash);
+    CREATE TABLE vectors (
+        text_hash   TEXT NOT NULL,
+        model_id    TEXT NOT NULL,             -- e.g. gemini-embedding-001@768
+        vector      BLOB NOT NULL,             -- float32 numbers, scaled to length 1
+        embedded_at TEXT NOT NULL,
+        PRIMARY KEY (text_hash, model_id)
     );
     """,
 ]
@@ -210,6 +247,9 @@ class CacheStats:
     files: int
     file_pages: int
     search_rows: int
+    chunks: int = 0
+    distinct_texts: int = 0
+    vectors: int = 0
 
 
 # ---------- The cache ----------
@@ -340,6 +380,8 @@ class ContentCache:
                 "VALUES (?, ?, 'page', ?, ?, ?)",
                 (title, text, course_code, site_id, content_id),
             )
+            self._replace_chunks(conn, site_id, content_id, "", page_chunks(course_code, site_id, content_id,
+                                                                             title, text))
 
     # A cached page, or None. Freshness is the caller's choice (is_fresh).
     def load_page(self, site_id: str, content_id: str) -> CachedPage | None:
@@ -380,6 +422,8 @@ class ContentCache:
                 [(file_name, text, course_code, site_id, content_id, file_ref, n)
                  for n, text in enumerate(pages, 1) if text.strip()],
             )
+            self._replace_chunks(conn, site_id, content_id, file_ref,
+                                 _file_chunks(course_code, site_id, content_id, file_ref, file_name, pages))
 
     # A file's cached text, but only if it was made from the item's current
     # version: pass the `modified` time NTULearn shows now. A different time
@@ -429,11 +473,13 @@ class ContentCache:
                          (site_id, content_id, file_ref))
         conn.execute("DELETE FROM search_text WHERE site_id = ? AND content_id = ? AND file_ref = ?",
                      (site_id, content_id, file_ref))
+        conn.execute("DELETE FROM chunks WHERE site_id = ? AND content_id = ? AND file_ref = ?",
+                     (site_id, content_id, file_ref))
 
     # Removes everything cached about one item (it disappeared from NTULearn).
     @staticmethod
     def _forget_item(conn: sqlite3.Connection, site_id: str, content_id: str) -> None:
-        for table in ("pages", "attachments", "files", "file_pages", "search_text"):
+        for table in ("pages", "attachments", "files", "file_pages", "search_text", "chunks"):
             conn.execute(f"DELETE FROM {table} WHERE site_id = ? AND content_id = ?", (site_id, content_id))
 
     # ----- Posts (announcements and messages, copied by search.py) -----
@@ -473,6 +519,111 @@ class ContentCache:
                 "SELECT COUNT(*) FROM search_text WHERE source IN ('announcement', 'message')").fetchone()[0]
         return {"codes": codes, "pages": pages, "files": files, "files_known": known, "posts": posts}
 
+    # ----- Chunks and vectors (meaning search, step 15) -----
+
+    # Replaces the chunks of one file (file_ref) or page (file_ref '') in an
+    # open transaction.
+    @staticmethod
+    def _replace_chunks(conn: sqlite3.Connection, site_id: str, content_id: str, file_ref: str,
+                        chunks: list[Chunk]) -> None:
+        conn.execute("DELETE FROM chunks WHERE site_id = ? AND content_id = ? AND file_ref = ?",
+                     (site_id, content_id, file_ref))
+        conn.executemany(
+            "INSERT INTO chunks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [(c.site_id, c.content_id, c.file_ref or "", c.page or 0, c.part, c.source, c.course_code,
+              c.title, _scrub(c.text), c.text_hash) for c in chunks],
+        )
+
+    # Makes chunks for cached files and pages that have none yet (text saved
+    # before step 15). Local only, no Gemini. Returns how many chunks it made.
+    def fill_missing_chunks(self) -> int:
+        made = 0
+        with self._connect() as conn, conn:
+            files = conn.execute(
+                "SELECT site_id, content_id, file_ref, course_code, file_name FROM files f WHERE NOT EXISTS "
+                "(SELECT 1 FROM chunks c WHERE c.site_id = f.site_id AND c.content_id = f.content_id "
+                "AND c.file_ref = f.file_ref)").fetchall()
+            for f in files:
+                pages = [r["text"] for r in conn.execute(
+                    "SELECT text FROM file_pages WHERE site_id = ? AND content_id = ? AND file_ref = ? ORDER BY number",
+                    (f["site_id"], f["content_id"], f["file_ref"]))]
+                chunks = _file_chunks(f["course_code"], f["site_id"], f["content_id"], f["file_ref"],
+                                      f["file_name"], pages)
+                self._replace_chunks(conn, f["site_id"], f["content_id"], f["file_ref"], chunks)
+                made += len(chunks)
+            pages = conn.execute(
+                "SELECT site_id, content_id, course_code, title, text FROM pages p WHERE NOT EXISTS "
+                "(SELECT 1 FROM chunks c WHERE c.site_id = p.site_id AND c.content_id = p.content_id "
+                "AND c.file_ref = '')").fetchall()
+            for p in pages:
+                chunks = page_chunks(p["course_code"], p["site_id"], p["content_id"], p["title"], p["text"])
+                self._replace_chunks(conn, p["site_id"], p["content_id"], "", chunks)
+                made += len(chunks)
+        return made
+
+    # Chunks whose text has no vector from `model_id` yet, one per distinct
+    # text (copies once), oldest file first. `limit` caps how many.
+    def pending_chunks(self, model_id: str, limit: int | None = None) -> list[Chunk]:
+        sql = ("SELECT * FROM chunks c WHERE NOT EXISTS (SELECT 1 FROM vectors v WHERE v.text_hash = c.text_hash "
+               "AND v.model_id = ?) GROUP BY c.text_hash ORDER BY c.rowid")
+        params: list = [model_id]
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
+        with self._connect() as conn:
+            return [_chunk(r) for r in conn.execute(sql, params)]
+
+    # Saves vectors (text_hash, vector) from `model_id`, as float32 bytes.
+    # Called after each batch, so a stop keeps every vector already made.
+    def save_vectors(self, model_id: str, vectors: list[tuple[str, np.ndarray]], embedded_at: datetime) -> None:
+        with self._connect() as conn, conn:
+            conn.executemany(
+                "INSERT OR REPLACE INTO vectors VALUES (?, ?, ?, ?)",
+                [(h, model_id, np.asarray(v, dtype=np.float32).tobytes(), time_to_db(embedded_at))
+                 for h, v in vectors],
+            )
+
+    # Every vector from `model_id` that some chunk still uses, as one matrix
+    # (one row per text hash) and the hashes in the same order. For search:
+    # matrix @ question vector gives every chunk's similarity at once.
+    def vector_matrix(self, model_id: str) -> tuple[list[str], np.ndarray]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT text_hash, vector FROM vectors v WHERE model_id = ? AND EXISTS "
+                "(SELECT 1 FROM chunks c WHERE c.text_hash = v.text_hash)", (model_id,)).fetchall()
+        if not rows:
+            return [], np.zeros((0, 0), dtype=np.float32)
+        return [r["text_hash"] for r in rows], np.stack([np.frombuffer(r["vector"], dtype=np.float32) for r in rows])
+
+    # The chunks (every place, copies included) for some text hashes.
+    def chunks_by_hash(self, hashes: list[str]) -> dict[str, list[Chunk]]:
+        found: dict[str, list[Chunk]] = {}
+        with self._connect() as conn:
+            for start in range(0, len(hashes), 500):          # SQLite caps the number of ? per query
+                part = hashes[start:start + 500]
+                for r in conn.execute(f"SELECT * FROM chunks WHERE text_hash IN ({','.join('?' * len(part))}) "
+                                      "ORDER BY rowid", part):
+                    found.setdefault(r["text_hash"], []).append(_chunk(r))
+        return found
+
+    # (distinct texts with a vector from `model_id`, distinct texts in all),
+    # for search's coverage line.
+    def embedding_counts(self, model_id: str) -> tuple[int, int]:
+        with self._connect() as conn:
+            total = conn.execute("SELECT COUNT(DISTINCT text_hash) FROM chunks").fetchone()[0]
+            done = conn.execute(
+                "SELECT COUNT(DISTINCT c.text_hash) FROM chunks c JOIN vectors v "
+                "ON v.text_hash = c.text_hash AND v.model_id = ?", (model_id,)).fetchone()[0]
+        return done, total
+
+    # Drops vectors no chunk uses any more (removed or changed text) and
+    # vectors from another model (they can't be compared with `model_id`'s).
+    def prune_vectors(self, model_id: str) -> int:
+        with self._connect() as conn, conn:
+            return conn.execute(
+                "DELETE FROM vectors WHERE model_id != ? OR NOT EXISTS "
+                "(SELECT 1 FROM chunks c WHERE c.text_hash = vectors.text_hash)", (model_id,)).rowcount
+
     # ----- Notes and counts -----
 
     # A small note, e.g. "indexer_finished_at". None if not set.
@@ -491,9 +642,26 @@ class ContentCache:
     def stats(self) -> CacheStats:
         with self._connect() as conn:
             n = {table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                 for table in ("courses", "items", "pages", "files", "file_pages", "search_text")}
+                 for table in ("courses", "items", "pages", "files", "file_pages", "search_text", "chunks", "vectors")}
+            distinct = conn.execute("SELECT COUNT(DISTINCT text_hash) FROM chunks").fetchone()[0]
         return CacheStats(courses=n["courses"], items=n["items"], pages=n["pages"], files=n["files"],
-                          file_pages=n["file_pages"], search_rows=n["search_text"])
+                          file_pages=n["file_pages"], search_rows=n["search_text"], chunks=n["chunks"],
+                          distinct_texts=distinct, vectors=n["vectors"])
+
+
+# A file's chunks, or none for data files (.csv): rows of numbers, not reading.
+def _file_chunks(course_code: str, site_id: str, content_id: str, file_ref: str, file_name: str,
+                 pages: list[str]) -> list[Chunk]:
+    if Path(file_name.lower()).suffix in DATA_EXTENSIONS:
+        return []
+    return file_chunks(course_code, site_id, content_id, file_ref, file_name, pages)
+
+
+# A chunks row back as a Chunk ('' and 0 back to None).
+def _chunk(r: sqlite3.Row) -> Chunk:
+    return Chunk(source=r["source"], course_code=r["course_code"], site_id=r["site_id"], content_id=r["content_id"],
+                 file_ref=r["file_ref"] or None, page=r["page"] or None, part=r["part"], title=r["title"],
+                 text=r["text"])
 
 
 # ---------- Self-test ----------
@@ -509,8 +677,13 @@ def _main() -> None:
 
     ap = argparse.ArgumentParser(description="Self-test of the content cache.")
     ap.add_argument("--real", action="store_true", help="show the real cache file's version and counts")
-    if ap.parse_args().real:
-        cache = ContentCache()
+    ap.add_argument("--fill-chunks", action="store_true",
+                    help="with --real: make the chunks for text cached before step 15 (local, no Gemini)")
+    args = ap.parse_args()
+    if args.real:
+        cache = ContentCache()          # opening it also adds the step 15 tables (schema version 2)
+        if args.fill_chunks:
+            print(f"made {cache.fill_missing_chunks()} chunks")
         with cache._connect() as conn:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
         print(f"{cache.path}: schema version {version}, {cache.stats()}")
@@ -558,6 +731,51 @@ def _main() -> None:
             everything = " ".join(str(tuple(r)) for t in ("items", "pages", "file_pages", "search_text")
                                   for r in conn.execute(f"SELECT * FROM {t}"))
         print(f"6) 'SECRET' anywhere in the file: {'SECRET' in everything}")
+
+        # Step 15: chunks and vectors.
+        model = "fake@4"
+        long_page = " ".join(f"w{i}" for i in range(450))
+        files = [ContentItem(id=i, course_code="XX1000", course_site_id="_1_1", title=n, kind="file",
+                             release=Release(state="open"), file_name=n)
+                 for i, n in (("_31_1", "avl.pdf"), ("_32_1", "avl (copy).pdf"), ("_33_1", "data.csv"))]
+        cache.save_tree("_1_1", "XX1000", [quiz, *files], now)
+        cache.save_file_text("_1_1", "XX1000", "_31_1", "_77_1", "avl.pdf", "pdf",
+                             ["AVL trees keep their height balanced", "Hi", long_page], None, now)
+        cache.save_file_text("_1_1", "XX1000", "_32_1", "_78_1", "avl (copy).pdf", "pdf",
+                             ["AVL trees keep their height balanced", "Hi", long_page], None, now)
+        cache.save_file_text("_1_1", "XX1000", "_33_1", "_79_1", "data.csv", "text",
+                             ["a,b,c,d,e,f,g,h,i,j,k"], None, now)
+        st = cache.stats()
+        print(f"7) two copies of a 3-page file + a csv: {st.chunks} chunks, {st.distinct_texts} distinct texts "
+              f"(page 2 too short, page 3 cut in 2, the csv none)")
+        todo = cache.pending_chunks(model)
+        print(f"8) to embed: {len(todo)} (each text once): {[(c.page, c.part) for c in todo]}")
+        cache.save_vectors(model, [(c.text_hash, np.array([1, 0, 0, 0], dtype=np.float32)) for c in todo[:2]], now)
+        hashes, matrix = cache.vector_matrix(model)
+        print(f"9) after 2 vectors: still to embed {len(cache.pending_chunks(model))}, matrix {matrix.shape}, "
+              f"counts {cache.embedding_counts(model)}, places of the first text: "
+              f"{[(c.content_id, c.page) for c in cache.chunks_by_hash(hashes[:1])[hashes[0]]]}")
+        cache.save_file_text("_1_1", "XX1000", "_31_1", "_77_1", "avl.pdf", "pdf",
+                             ["AVL trees keep their height balanced", "Hi", long_page], None, now)
+        print(f"10) same text saved again: still to embed {len(cache.pending_chunks(model))} (vectors kept)")
+        cache.save_tree("_1_1", "XX1000", [quiz, files[0]], now)    # the copy disappears: its text stays
+        print(f"11) copy removed: {cache.stats().chunks} chunks left, still embedded {cache.embedding_counts(model)}, "
+              f"pruned {cache.prune_vectors(model)}")
+        cache.save_tree("_1_1", "XX1000", [quiz], now)               # the original too
+        print(f"    original removed: {cache.stats().chunks} chunks left, pruned {cache.prune_vectors(model)} "
+              f"vectors, matrix {cache.vector_matrix(model)[1].shape}")
+
+        # A cache from before step 15 (version 1, text but no chunks) is upgraded on open.
+        with cache._connect() as conn:
+            conn.executescript("DROP TABLE chunks; DROP TABLE vectors; PRAGMA user_version = 1;")
+            conn.execute("INSERT INTO pages VALUES ('_1_1', '_20_1', 'XX1000', 'Intro', "
+                         "'Welcome to the course, read the outline first.', '[]', NULL, '2026-10-30T02:00:00Z')")
+            conn.commit()
+        old = ContentCache(cache.path)
+        with old._connect() as conn:
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+        print(f"12) old cache reopened: version {version}; fill_missing_chunks made {old.fill_missing_chunks()}, "
+              f"again {old.fill_missing_chunks()}")
 
 
 if __name__ == "__main__":

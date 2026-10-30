@@ -58,6 +58,9 @@ INDEX_LOCK = DATA_DIR / "index.lock"
 # until the content item's `modified` time changes (the probe found no size
 # or modified time on attachments themselves).
 CONTENT_FRESH_S = 6 * 60 * 60
+# Raw data files, not reading: the indexer skips them, search leaves them out,
+# and they get no chunks for meaning search (step 13's decision c).
+DATA_EXTENSIONS = {".csv"}
 
 # Size limits, counted while downloading: no file download sends a size up
 # front (probe, 29 Oct: no Content-Length), and only 7 of 283 embedded files

@@ -21,6 +21,9 @@ This file does two things:
 Gemini, free tier (your choice, 30 Oct):
   - The key comes from .env (GEMINI_API_KEY) and goes in a request header
     (x-goog-api-key), never in a URL, a log line or an error message.
+  - Settings (task type, vector size, title) go as top-level fields of each
+    request: Gemini ignored the newer embedContentConfig object (30 Oct), and
+    every answer's vector size is checked.
   - Paced under the per-minute limits (80% of them): requests and estimated
     tokens over the last 60 s are counted, and a call waits when needed.
   - Limits give a plain answer, never a bare failure (your rule):
@@ -97,11 +100,13 @@ class Chunk:
     title: str
     text: str
 
-    # The text's fingerprint: the same text (a copy of a file) gets the same
-    # hash, so it's embedded once and its vector shared (step 15).
+    # The text's fingerprint: the same text gets the same hash, so it's
+    # embedded once and its vector shared (step 15). The title is left out:
+    # copies of a file often have different names ("avl (1).pdf"); the
+    # vector is made with the first copy's title.
     @property
     def text_hash(self) -> str:
-        return hashlib.sha256(f"{self.title}\x00{self.text}".encode()).hexdigest()
+        return hashlib.sha256(self.text.encode()).hexdigest()
 
 
 WORD_SPLIT = re.compile(r"\S+")
@@ -275,7 +280,7 @@ class GeminiEmbedder:
             got = answer.get("embeddings") or []
             if len(got) != len(batch):
                 raise EmbeddingUnavailable("service", f"Gemini answered {len(got)} vectors for {len(batch)} texts.")
-            vectors += [normalized(e.get("values") or []) for e in got]
+            vectors += [self._vector(e.get("values") or []) for e in got]
         return vectors
 
     # The vector of a search question (as RETRIEVAL_QUERY). Never waits: a
@@ -283,17 +288,31 @@ class GeminiEmbedder:
     def embed_query(self, text: str) -> np.ndarray:
         answer = self._post("embedContent", self._request(text, "RETRIEVAL_QUERY", None),
                             estimate_tokens(text), wait=False, on_wait=None)
-        return normalized((answer.get("embedding") or {}).get("values") or [])
+        return self._vector((answer.get("embedding") or {}).get("values") or [])
 
     # One text as Gemini wants it: the text, plus its settings (task type,
-    # vector size, title for documents) in embedContentConfig.
+    # vector size, title for documents) as top-level fields. The docs call
+    # these deprecated in favour of an embedContentConfig object, but Gemini
+    # silently ignored that object (your --check, 30 Oct: 3072 numbers, not
+    # 768), while these fields work. _vector() checks the size every time.
     @staticmethod
     def _request(text: str, task: str, title: str | None) -> dict:
-        config: dict = {"taskType": task, "outputDimensionality": EMBED_DIMENSIONS, "autoTruncate": True}
+        request: dict = {"model": f"models/{EMBED_MODEL}", "content": {"parts": [{"text": text}]},
+                         "taskType": task, "outputDimensionality": EMBED_DIMENSIONS}
         if title:
-            config["title"] = title
-        return {"model": f"models/{EMBED_MODEL}", "content": {"parts": [{"text": text}]},
-                "embedContentConfig": config}
+            request["title"] = title
+        return request
+
+    # One vector from Gemini's answer, scaled to length 1. A wrong size means
+    # Gemini ignored our settings: stop rather than store vectors that can't
+    # be compared with the others.
+    @staticmethod
+    def _vector(values: list[float]) -> np.ndarray:
+        if len(values) != EMBED_DIMENSIONS:
+            raise EmbeddingUnavailable(
+                "service", f"Gemini returned vectors of {len(values)} numbers instead of {EMBED_DIMENSIONS}: "
+                           "it ignored the requested size (a change on Google's side?).")
+        return normalized(values)
 
     # One call to Gemini, paced, with the limit cases told apart. Returns the
     # JSON answer or raises EmbeddingUnavailable.
@@ -412,7 +431,8 @@ def _offline() -> None:
     v = e.embed_documents(chunks[:2])
     body = s.sent[0]["body"]["requests"][0]
     print(f"2) one batch: {len(v)} vectors of {v[0].shape[0]}, length {np.linalg.norm(v[0]):.2f}; "
-          f"sent config {body['embedContentConfig']}; key in URL: {'SECRET' in s.sent[0]['url']}")
+          f"sent {sorted(k for k in body if k != 'content')}, size {body['outputDimensionality']}; "
+          f"key in URL: {'SECRET' in s.sent[0]['url']}")
 
     many = [chunks[0]] * 120
     s = _FakeSession([(200, _vectors(50)), (200, _vectors(50)), (200, _vectors(20))])
@@ -440,6 +460,7 @@ def _offline() -> None:
         ("403", [(403, {"error": {"status": "PERMISSION_DENIED"}})], "docs"),
         ("no internet", [requests.ConnectionError("SECRET-KEY in a message")], "docs"),
         ("Gemini down", [(503, {}), (503, {}), (503, {})], "docs"),
+        ("wrong vector size", [(200, {"embeddings": [{"values": [0.1] * 3072}]})], "docs"),
     ]
     for name, answers, call in cases:
         e = GeminiEmbedder("SECRET-KEY", _FakeSession(answers), clock, sleep)
