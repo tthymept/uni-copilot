@@ -68,6 +68,7 @@ XID_RE = re.compile(r"xid-\d+_\d+")
 HREF_RE = re.compile(r"""\shref=(["'])(.*?)\1""", re.S)
 # Paths on NTULearn whose links carry signed values (file store, session files).
 SIGNED_PATH_PREFIXES = ("/bbcswebdav/", "/sessions/")
+TEXT_URL_RE = re.compile(r"https?://[^\s)\]>\"']+")     # a link written out as plain text
 
 
 # ---------- Small helpers ----------
@@ -246,9 +247,11 @@ def embedded_links(body: str | None) -> dict[str, str]:
 
 # What read_page shows of a page body: light Markdown (Phase 1's parse_html,
 # which already writes every <a data-bbfile> as "[file: name]" without its
-# link) and its links, with one more safety pass: any remaining signed file
-# link (e.g. one a prof pasted by hand) becomes "[file: text]" and leaves the
-# links list, so no signed link reaches Claude or the cache.
+# link) and its links, with two more safety passes: a remaining signed file
+# link in a tag becomes "[file: text]" and leaves the links list, and one
+# written out as plain text (a prof pasted it into the text; found by the
+# tests, 30 Oct) becomes "[file link hidden]". So no signed link reaches
+# Claude or the cache (cache.py's _scrub is a last net behind this).
 def page_text(body: str | None) -> tuple[str, list[Link]]:
     parsed = parse_html(body)
     text = parsed.text
@@ -258,6 +261,7 @@ def page_text(body: str | None) -> tuple[str, list[Link]]:
             text = text.replace(f"[{link_text}]({href})", f"[file: {link_text}]").replace(href, "[file link hidden]")
         else:
             links.append(Link(text=link_text, url=href))
+    text = TEXT_URL_RE.sub(lambda m: "[file link hidden]" if is_signed_file_link(m.group(0)) else m.group(0), text)
     return text, links
 
 

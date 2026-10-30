@@ -205,12 +205,13 @@ def _varied(rows: list[tuple], limit: int) -> list[tuple]:
 
 class ContentSearch:
     # Keeps the cache and where the event store is (tests pass temporary
-    # files), and how to get an embedder (made on the first search that needs
-    # one; if that fails, e.g. no key yet, it's tried again next time).
-    def __init__(self, cache: ContentCache, store_path: Path | str = STORE_PATH,
+    # files; None = STORE_PATH, looked up now so tests can point it elsewhere),
+    # and how to get an embedder (made on the first search that needs one; if
+    # that fails, e.g. no key yet, it's tried again next time).
+    def __init__(self, cache: ContentCache, store_path: Path | str | None = None,
                  embedder_factory: Callable[[], Embedder] = make_embedder, model_id: str = GEMINI_MODEL_ID):
         self._cache = cache
-        self._store_path = Path(store_path)
+        self._store_path = Path(store_path) if store_path is not None else STORE_PATH
         self._embedder_factory = embedder_factory
         self._model_id = model_id
         self._embedder: Embedder | None = None

@@ -1092,6 +1092,33 @@ uv run python -m uni_copilot.notify.telegram --send-test-file
 
 The second sends one tiny made-up text file to your chat. Then from your phone: "send me the IE2108 week 11 lecture slides": Claude should name the file and ask; after "yes" the PDF arrives as a document, then a short reply.
 
+## Step 23: tests (synthetic only)
+
+The self-tests and scratch checks of steps 4-22 become permanent `pytest` tests: they run offline in seconds with `uv run pytest`, on made-up data only, every time. **187 → 272 passed** (4 skipped: the opt-in live tests).
+
+**New files in `tests/`:**
+
+- **`fake_ntulearn.py`** (a helper, not a test): one made-up course XX1000 with a folder, an Ultra page embedding `week10-slides.pdf` by a signed link (its secret part is the word `SECRET`), a file item `T10.pdf` and a quiz; `FakeContentHttp` answers like NTULearn and writes a tiny real PDF for downloads; `FakeCourses`.
+- **`test_content_parsers.py`** (11): kinds (folder, page, file, assessment; the hidden page body isn't an item), file and quiz fields, release conditions (public and internal, date rules), **the signed link only from `embedded_links`, never in page text, links or an item**, a signed link pasted as plain text hidden, quiz details with no score field; PDF, PPTX (tables, groups, notes) and notebook text; type by first bytes; page ranges.
+- **`test_content_cache.py`** (8): tree freshness, file text per version, a removed item forgets its page, file text, search rows and chunks; **no signed link anywhere in the database**; chunks and copies (6 chunks, 3 distinct texts; short pages and csv none); vectors shared by copies and pruned; other-model vectors dropped; upgrade from version 1.
+- **`test_search.py`** (13): query words and quoting; keyword search with copies merged, csv out, bold snippets, posts from a made-up event store (removed ones not), odd FTS5 characters harmless; most words first; course filter and its errors; **hybrid**: the AVL file found both ways first, `balance.pdf` found by meaning only (never says "rotation"), the question embedded once; **every fallback** (daily, per-minute, no credit, offline, rejected key, no key, nothing embedded yet with no request, posts only) gives keyword results with the plain reason.
+- **`test_embeddings.py`** (16): chunk sizes and overlap, one chunk per slide, copies share a hash; the batch request (top-level settings, key in a header only, vectors of length 1); the question request; per-minute limit waited out; **eight failure answers** each with its kind and plain reason and never the key (daily, 402, spend cap, invalid key, 403, no connection, 503 three times, wrong vector size); a search never waits; the pacer counts texts; free/paid tiers.
+- **`test_http_files.py`** (7): the redirect chain (two NTULearn hops on the signed-in session, the file server on the cookie-less one; only host names back), the size limit (streamed and announced), **a redirect to an unknown host refused**, signed out → one silent sign-in, a start off NTULearn refused, too many redirects, **no signed link in an error**.
+- **`test_contents_files.py`** (17): `safe_file_name` (`..\`, `../`, `CON`, `nul`, odd characters, trailing dots, empty, long names keep the extension), `unique_path` never overwrites (also a `.part` in the way), file text downloaded once then cached, embedded file text, `save_file` (" (2)", no `.part` left, a failed download leaves nothing), videos refused, `file_bytes_for_sending` (PDF/PPTX only, by name and by first bytes), no signed link in `read_page` / `list_course_content`.
+- **`test_indexer.py`** (6): reads once (a rerun asks only for the tree), a removed file skipped while the run goes on, a dry run sends nothing, **the daily limit stops cleanly and `--embed-only` carries on with no NTULearn request**, no key skips embedding, `--max-tokens` and Ctrl+C keep what's done.
+- **`test_send_course_file.py`** (7): `send_document` (multipart to your chat, limits, name cleaned, token scrubbed); the tool sends a file item and an embedded file with the course in the caption and **no signed link**; a quiz, a removed file and Telegram not set up are plain errors and nothing is sent.
+
+(The guard test "every ntulearn tool is pre-allowed or denied in Telegram" came with step 19.)
+
+**Two real problems the tests found, both fixed:**
+
+1. **A signed file link pasted into a page as plain text** (not as a link) was not hidden by `parsers/content.py`'s `page_text`: only the cache's last safety net (`_scrub`) masked it before saving, which is why it never showed. `page_text` now hides those too (`TEXT_URL_RE`), so the parser itself never returns one.
+2. **`ContentSearch`'s event store path was fixed when the code loaded**, so a test pointing `STORE_PATH` elsewhere had no effect: the indexer tests were opening your **real** event store (read-only) and copying your real posts into the temporary test cache (deleted after the test, never shown). Now `store_path=None` means "look up `STORE_PATH` now", and tests stay on made-up data.
+
+Also: a test id may not hold 50 MB (Windows limits environment variables to 32,767 characters; pytest puts the test name in one), so the size test passes a number.
+
+Check: `uv run pytest` → 272 passed, 4 skipped.
+
 ## Open items
 
 Everything not yet verified in Phase 4. Updated as steps finish.
