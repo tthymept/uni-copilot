@@ -50,6 +50,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 from uni_copilot.ntulearn_mcp.config import CONTENT_DB, CONTENT_FRESH_S
 from uni_copilot.ntulearn_mcp.models import ContentItem, FileType, Link
@@ -425,6 +426,41 @@ class ContentCache:
     def _forget_item(conn: sqlite3.Connection, site_id: str, content_id: str) -> None:
         for table in ("pages", "attachments", "files", "file_pages", "search_text"):
             conn.execute(f"DELETE FROM {table} WHERE site_id = ? AND content_id = ?", (site_id, content_id))
+
+    # ----- Posts (announcements and messages, copied by search.py) -----
+
+    # Replaces every copied post in the search table with `rows` in one
+    # transaction, and remembers `marker` (the event store's last sync times)
+    # so the copy is only redone when the store has changed.
+    # Each row: (title, body, "announcement" | "message", course_code, site_id, event_id).
+    def replace_posts(self, rows: list[tuple[str, str, str, str, str, str]], marker: str) -> None:
+        with self._connect() as conn, conn:
+            conn.execute("DELETE FROM search_text WHERE source IN ('announcement', 'message')")
+            conn.executemany(
+                "INSERT INTO search_text (title, body, source, course_code, site_id, event_id) VALUES (?, ?, ?, ?, ?, ?)",
+                [(title, _scrub(body), source, code, site, event_id) for title, body, source, code, site, event_id in rows],
+            )
+            conn.execute("INSERT INTO state VALUES ('posts_marker', ?) "
+                         "ON CONFLICT (key) DO UPDATE SET value = excluded.value", (marker,))
+
+    # What search covers, for its coverage line: course codes with a cached
+    # tree, pages, files read, posts copied, and files KNOWN (readable file
+    # items and embedded files with a link, from the trees), so an answer can
+    # say "120 of 230 files read".
+    def coverage_counts(self, readable_extensions: set[str]) -> dict[str, Any]:
+        with self._connect() as conn:
+            codes = {r["course_code"] for r in conn.execute("SELECT DISTINCT course_code FROM courses")}
+            known = 0
+            for r in conn.execute("SELECT item_json FROM items"):
+                item = json.loads(r["item_json"])
+                names = [item.get("file_name") or ""] if item.get("kind") == "file" else []
+                names += [f["name"] for f in item.get("embedded_files") or [] if f.get("has_link")]
+                known += sum(1 for n in names if Path(n.lower()).suffix in readable_extensions)
+            pages = conn.execute("SELECT COUNT(*) FROM pages").fetchone()[0]
+            files = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+            posts = conn.execute(
+                "SELECT COUNT(*) FROM search_text WHERE source IN ('announcement', 'message')").fetchone()[0]
+        return {"codes": codes, "pages": pages, "files": files, "files_known": known, "posts": posts}
 
     # ----- Notes and counts -----
 

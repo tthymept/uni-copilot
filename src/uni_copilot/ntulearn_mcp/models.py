@@ -422,7 +422,8 @@ class SearchCoverage(_Model):
     courses_indexed: int
     courses_total: int
     pages: int
-    files: int
+    files: int = Field(description="Files whose text has been read into the index.")
+    files_known: int = Field(default=0, description="Readable files known from the course trees (read or not).")
     posts: int
     chunks_with_meaning: int = Field(description="Text pieces that meaning search can find (have an embedding).")
     chunks_total: int

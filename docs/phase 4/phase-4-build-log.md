@@ -687,11 +687,62 @@ Check (PowerShell, then Claude Code):
 2. `uv run python -m uni_copilot.ntulearn_mcp.server --self-test`: lines 1–5 as before (10 tools now), then `6) list_course_content(<course>) -> is_error=False, items=…, has cached_sgt: True` and `7) read_page(unknown id) -> error Claude reads: No item _0_0 …`. This one uses and fills the **real** cache (`.data\cache\content.sqlite`), with one course's tree.
 3. Ask Claude a real question, e.g. "What's in IE2108's latest lecture slides?" or "Is there a password or lockdown browser for my next IE2108 quiz?". Expect `list_course_content`, then `read_file_text` or `get_assessment`, an answer citing the file and pages, and "cached at …".
 
+**Live (30 Oct, after `/mcp` → reconnect `ntulearn`):**
+
+- **A real question in Claude Code**, "What's in IE2108's latest lecture slides?": Claude used `list_course_content` (top level, live, IE2108's 2 sites), then `list_course_content` on the Lectures folder (from the cache), found `Lec_IE2108_W11.pdf` (the last lecture taught; W12/W13 already posted), and `read_file_text` downloaded and read its 19 slides in one call (no `next_pages`); the answer cited the file, slide numbers and "cached at Fri 30 Oct 00:37 SGT". Slides that are only images (the optional code) came through as titles only, as expected without OCR.
+- **`--self-test`:** 10 tools, all read-only; the Phase 1 lines unchanged; `list_course_content(CC0006)` fetched both sites live (113 + 32 items), 25 top-level items, `cached_sgt` present; `read_page` with an unknown id → "No item _0_0 in CC0006. Use list_course_content to find it." Before saying "no such item", `_find` fetches the trees once more (the item might be new), so a wrong id costs two extra requests: fine for a mistake.
+- The real cache (`.data\cache\content.sqlite`) now holds IE2108 and CC0006 trees and the W11 slides' text.
+
+**Done (30 Oct).**
+
 Commit:
 
 ```
 git add src/uni_copilot/ntulearn_mcp/server.py .claude/settings.json tests/test_server.py docs
 git commit -m "feat(ntulearn): add content tools for folders, pages, file text and quizzes"
+```
+
+## Step 11: search.py (keyword search)
+
+**Why search when browsing works** (your question): the tools of step 10 read a place you can point to ("the latest lecture slides" → the Lectures folder → the newest file). Search answers "which place?" when the question doesn't say ("which week covered AVL rotations?", "did anyone mention a calculator?"): one call over everything stored, instead of opening files one by one (20+ downloads for one course's lectures the first time). It's an MCP tool like the others (from step 13); it just reads the local database, never NTULearn.
+
+**How the content database is kept up to date** (your question; decisions 4 and 5): no timer for course content. Trees and page text are refreshed when a tool needs that course and the copy is over 6 hours old (or `refresh=true`); file text is re-read only when the file changed **and** something reads it; the indexer (step 12) updates everything when you run it. On every tree fetch, new items go in (titles searchable at once, page text too), items gone from NTULearn lose their text and search entries (`_forget_item`), replaced files are noticed (`modified` / new `xid`, `prune_files`). Announcements and messages follow the scheduled sync (every 2 hours, 07:00–23:00). A scheduled indexer (poked every 30 minutes, the code runs it between 01:00 and 06:00 if the index is over a day old) is the open decision 4c, after the test week.
+
+**New file `src/uni_copilot/ntulearn_mcp/search.py`**, `KeywordSearch`:
+
+- **`match_queries(query)`:** the user's words → two FTS5 queries: all words (`"avl" "rotations"`) and any word (`"avl" OR "rotations"`). Each word is **quoted**, so FTS5 syntax typed in a question (`-`, `:`, `"`, `*`, `AND`, `NEAR(`) can't change or break the query.
+- **`search(query, course, sources, limit)`:** copies posts if needed, picks the course, runs "all words"; if nothing, "any word" with a note saying so. Returns `SearchResults` with `search_mode = keyword_only` and `mode_reason` "Meaning search isn't built yet (Phase 4 steps 14-17)".
+- **`refresh_posts()`:** opens the Phase 2 store **read-only** (`file:...?mode=ro`, SQLite refuses any write), compares its `last_sync:ntulearn_announcement` / `last_sync:ntulearn_message` with the last copy's marker, and only if they differ replaces the copied posts (non-removed announcements and messages) in one transaction (`cache.replace_posts`, new). A missing or unreadable store becomes a note; content search still runs.
+- **`_run()`:** one FTS5 query ranked with **BM25** (a title match counts 5×), filtered by course and source, `snippet()` around the match with matched words in `**bold**` (FTS5 marks them with two invisible characters first, `\x02` / `\x03`, so the code can tell a text match from a title-only match; then they become `**`, plain ASCII, safe on Telegram and on a Windows console). Posts get their own link from the store; course content the course page.
+- **`_varied()`:** no single kind of hit (titles, files, pages, announcements, messages) may fill more than half the results, unless nothing else matched. Found on your data: "quiz" returned 10 item titles (short titles, weighted 5×, always won); now 5 titles and 5 announcements.
+- **`_pick_code()`:** the course by part of its code, from the codes the cache and the store know (no NTULearn call); 0 or 2+ matches → a plain message listing them.
+- **`coverage()`:** courses with a cached tree / courses known, pages, **files read of files known** (`files_known`, new in `SearchCoverage` and `cache.coverage_counts`: readable file items and embedded files with a link, from the trees), posts, and `indexed_at` (when the indexer last finished, step 12).
+
+**New ideas:**
+
+- **BM25:** a ranking score: a word that appears often in a short text, and rarely across all texts, scores high.
+- **Quoting user input for a query language:** the same idea as escaping HTML (Phase 3): other people's or the user's characters must never become syntax.
+- **Read-only database connection (`mode=ro`):** SQLite itself refuses writes, so search can't change the Phase 2 store even by mistake.
+- **Result variety:** taking the best of each kind, not only the best overall, so one kind can't crowd out the others.
+
+Checks (30 Oct):
+
+- **Offline** (`python -m uni_copilot.ntulearn_mcp.search`, a temporary cache and a made-up store): "AVL rotations" → the PDF's pages 3 and 2 and an announcement, words in bold; a removed post left out; only messages; the course filter; "AVL penguin" falls back to any word with a note; FTS5 syntax in the words harmless; posts not re-copied without a store change; empty words, an unknown course and an ambiguous course as plain messages.
+- **Your real data** (`--real "words"`, counts only; the store read-only): coverage 3 of 8 courses with a cached tree, 128 pages, **3 of 138 known files read**, 57 posts (all 42 announcements and 15 messages); "dijkstra shortest path" → the Week 11 slides, pages 1, 2 and 19; "quiz" → 5 titles and 5 announcements from four courses.
+- `uv run pytest` → 186 passed, 4 skipped.
+
+Check (PowerShell; local only, never NTULearn):
+
+```
+uv run python -m uni_copilot.ntulearn_mcp.search
+uv run python -m uni_copilot.ntulearn_mcp.search --real "dijkstra shortest path"
+```
+
+Commit:
+
+```
+git add src/uni_copilot/ntulearn_mcp/search.py src/uni_copilot/ntulearn_mcp/cache.py src/uni_copilot/ntulearn_mcp/models.py docs
+git commit -m "feat(ntulearn): add keyword search over course content and posts"
 ```
 
 ## Open items
