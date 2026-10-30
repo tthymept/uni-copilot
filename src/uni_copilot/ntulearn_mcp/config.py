@@ -136,6 +136,12 @@ def _setting(name: str, file_values: dict[str, str]) -> str:
     return (os.environ.get(name) or file_values.get(name) or "").strip()
 
 
+# One Phase 4 setting read now (environment first, then .env), e.g. the
+# Gemini key for embeddings.py. "" if it isn't set. Callers never print it.
+def env_setting(name: str) -> str:
+    return _setting(name, _env_file_values())
+
+
 # Where download_file saves: UNI_COPILOT_DOWNLOAD_DIR (environment or .env)
 # if set, else your Downloads folder + "uni-copilot" (decision 7). Each
 # course gets a subfolder. `~` is allowed.

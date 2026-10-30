@@ -827,6 +827,8 @@ Your OK (30 Oct, "next"): a, b and c from step 12.
 **New ideas:**
 
 - **Annotations are hints, permissions decide:** `read_only_hint`, `idempotent_hint` and `open_world_hint` describe a tool to the client; whether Claude Code asks you is decided by `.claude/settings.json` (allow list) and the Telegram session's deny list (step 19).
+- **Chunking:** cutting text into pieces small enough for one vector each, overlapping so nothing is lost at a cut.
+- **Normalizing:** scaling a vector to length 1, so cosine similarity is a plain dot product.
 - **Stop words:** words so common they say nothing about the topic; left out of keyword queries.
 
 Checks (30 Oct, offline): search's self-test, new checks 9-12: "AVL trees penguin" puts rows with 2 words first and the rare "penguin" row after them; a copied file gives one hit with `also_in`; the csv is left out of hits and coverage; "What is a rotation?" → `['rotation']`. In-process: both tools listed with the right annotations; `search(course="2108")` works; bad words, unknown course and `limit=99` give readable errors. `uv run pytest` → 186 passed, 4 skipped.
@@ -853,6 +855,50 @@ git add src/uni_copilot/ntulearn_mcp tests/test_server.py .claude/settings.json 
 git commit -m "feat(ntulearn): add search and download_file tools"
 ```
 
+## Step 14: embeddings.py (chunks, and Gemini behind one small interface)
+
+**Before building (30 Oct):** the Gemini API terms re-read, as planned. Free tier: Google may use what's sent "to provide, improve, and develop Google products … and machine learning technologies", "human reviewers may read, annotate, and process your API input and output", and "Do not submit sensitive, confidential, or personal information". Paid tier (billing on the project): not used to improve products. Measured size: ~4,200 distinct file pages, ~490,000 words, **~0.7 million tokens** (the plan guessed 2 million). Options given: free tier, billing (cents), or a local model. **Your choice: the free tier**, own Google Cloud project `uni-copilot`, key in `.env` (done by you, 30 Oct). Key steps written down in the chat: Cloud console → new project (No organization) → AI Studio → Dashboard → Projects → Import projects → API Keys → Create API key → restrict to the Gemini API if it says "Unrestricted". Since 28 May 2026, new AI Studio keys are "auth keys" bound to a service account.
+
+**New file `src/uni_copilot/ntulearn_mcp/embeddings.py`:**
+
+- **Chunks:** `split_words()` cuts a page into pieces of ~300 words overlapping by 50 (`CHUNK_WORDS`, `CHUNK_OVERLAP_WORDS`); a page up to 300 words stays one piece; pieces under 5 words ("Questions?") are dropped. `file_chunks()` keeps each page/slide on its own (a hit can say "slide 14"), `page_chunks()` does course pages. A `Chunk` keeps course, site, content id, file_ref, page, part, title and text; `text_hash` (SHA-256 of title + text) is the same for copies, so step 15 embeds each distinct text once (decision b of step 12).
+- **One interface, `Embedder`:** `embed_documents(chunks)` and `embed_query(text)` return vectors; `model_id` (`gemini-embedding-001@768`) is stored with each vector in step 15, so a model change is noticed.
+- **`GeminiEmbedder`:** `batchEmbedContents` for chunks (as `RETRIEVAL_DOCUMENT`, with the title; 50 per request), `embedContent` for a question (`RETRIEVAL_QUERY`); settings in `embedContentConfig` (the current form; the top-level fields are deprecated): `outputDimensionality: 768`, `autoTruncate: true`. Vectors are scaled to length 1 (`normalized`), as Google asks for shortened vectors; similarity is then a dot product. The key goes in the `x-goog-api-key` header, never in the URL, a log or a message (the self-test checks).
+- **Pacing:** `_MinutePacer` counts requests and estimated tokens (~4 characters per token) of the last 60 s and waits before a call that would pass 80 requests or 24,000 tokens a minute (80% of the free tier).
+- **Limits, your rule ("a proper answer, never just fail"):** everything that stops meaning search is `EmbeddingUnavailable(kind, reason)`:
+  - `minute_limit` (429 with a retry delay): while indexing, wait the delay (≤ 120 s, at most 3 times in a row) and carry on, saying "waiting 40 s for Gemini's per-minute limit"; in a search, at once (a search mustn't hang);
+  - `daily_limit` (429 whose quota id says "PerDay"): "Gemini's free daily limit is used up; it resets at midnight US Pacific time (Fri 15:00 SGT)", worked out with the time zones (15:00 or 16:00 SGT, depending on US daylight saving);
+  - `bad_key` (401/403, or an `API_KEY_...` reason), `no_key`, `off` (`UNI_COPILOT_EMBEDDINGS`), `offline` (no connection), `service` (5xx after 2 retries with a pause, or anything else).
+  Search (step 16) shows the reason with keyword-only results; the indexer (step 17) stops cleanly with it.
+- **`config.py`:** a small public `env_setting(name)` (environment first, then `.env`) so the key is read the same way as the other Phase 4 settings.
+- **Not NTULearn:** plain `requests` to Google; `client/http.py` stays NTULearn-only.
+
+**Not verified yet:** the exact shape of Gemini's 429 answer (the self-test uses the usual Google error shape: `QuotaFailure` with a `quotaId` containing "PerMinute"/"PerDay", and `RetryInfo` with `retryDelay`); whether one batch request counts as 1 or 50 toward the 1,000-a-day limit; whether `batchEmbedContents` accepts `embedContentConfig` (the `--check` shows it: vectors of 768, not 3072, and no 400).
+
+**New ideas:**
+
+- **Chunking:** cutting text into pieces small enough for one vector each, with some overlap so nothing is lost at the cut.
+- **Normalizing a vector:** scaling it to length 1, so comparing two vectors (cosine similarity) is just multiplying and adding.
+- **Sliding window rate limiting:** counting what was sent in the last 60 seconds, not per calendar minute.
+
+Checks (30 Oct, offline): chunks (short pages dropped, 700 words → 300/300/200 with overlap, copies share a hash); a batch sends the right settings and no key in the URL; 120 chunks → 3 requests; a per-minute 429 while indexing waits 40 s and carries on; in a search it reports at once; daily 429, rejected key, 403, no internet and Gemini down each give their plain reason and never the key; the pacer waits 60 s for request 81 and 15 s for tokens over the cap. `uv run pytest` → 186 passed, 4 skipped.
+
+Check (PowerShell). The second command is live: 2 requests to Gemini with 3 made-up sentences and the words "AVL rotation" (nothing from your courses):
+
+```
+uv run python -m uni_copilot.ntulearn_mcp.embeddings
+uv run python -m uni_copilot.ntulearn_mcp.embeddings --check
+```
+
+Expected from `--check`: "key found: yes", vector sizes 768, and the AVL sentence the most similar to "AVL rotation" though it never says "rotation".
+
+Commit:
+
+```
+git add src/uni_copilot/ntulearn_mcp/embeddings.py src/uni_copilot/ntulearn_mcp/config.py docs
+git commit -m "feat(ntulearn): add chunking and gemini embeddings with limit handling"
+```
+
 ## Open items
 
 Everything not yet verified in Phase 4. Updated as steps finish.
@@ -862,7 +908,8 @@ Everything not yet verified in Phase 4. Updated as steps finish.
 - **One embedded PPTX answers 404** on Blackboard's file server (removed from the store, still linked on its page). Step 9's `read_file_text` should turn that into a plain "NTULearn couldn't find this file; it may have been removed from the page".
 
 - **All of "Things to check" in `phase-4-core.md`:** the probe (step 1) answers the NTULearn ones; the Gemini ones are checked in steps 14 and 17.
-- **Gemini's free-tier data terms:** re-read when building step 14; billing is the switch if they're not acceptable.
+- **Resolved (30 Oct, step 14):** Gemini's free-tier data terms re-read; you chose the free tier for course content (billing stays the switch).
+- **Gemini, not verified until `--check` and step 17:** the 429 answer's exact shape, how a batch counts toward 1,000 requests a day, whether `embedContentConfig` is accepted in batches.
 - **Telegram tool list:** new `ntulearn` tools appear in the locked Telegram session by themselves (the lock limits only built-in tools). Until steps 18–19, a new tool there would wait for a click at the PC.
 
 ## Concepts
