@@ -831,6 +831,7 @@ Your OK (30 Oct, "next"): a, b and c from step 12.
 - **Normalizing:** scaling a vector to length 1, so cosine similarity is a plain dot product.
 - **Schema migration:** a numbered change to a database's tables, applied once to an existing file.
 - **Content-addressed storage:** storing something under the hash of its content, so identical content is stored once.
+- **Reciprocal rank fusion (RRF):** merging ranked lists by rank (1/(60 + rank), added up), so scores on different scales never have to be compared.
 - **Stop words:** words so common they say nothing about the topic; left out of keyword queries.
 
 Checks (30 Oct, offline): search's self-test, new checks 9-12: "AVL trees penguin" puts rows with 2 words first and the rare "penguin" row after them; a copied file gives one hit with `also_in`; the csv is left out of hits and coverage; "What is a rotation?" → `['rotation']`. In-process: both tools listed with the right annotations; `search(course="2108")` works; bad words, unknown course and `limit=99` give readable errors. `uv run pytest` → 186 passed, 4 skipped.
@@ -934,6 +935,90 @@ uv run python -m uni_copilot.ntulearn_mcp.embeddings
 uv run pytest
 ```
 
+## Step 16: search.py (hybrid: keyword + meaning, merged)
+
+**`search.py`** (class renamed `KeywordSearch` → **`ContentSearch`**; `server.py` and `indexer.py` updated):
+
+- **Two lists, then one:**
+  - the **keyword list** as before (all words, else any word with most words first), now as plain rows (`_keyword_rows`, `_fts`);
+  - the **meaning list** (`_meaning_rows`): the question becomes a vector (`_question_vector`: 1 Gemini request; the last 64 questions are remembered, so asking again costs nothing), then **one matrix multiplication** (`cache.vector_matrix(model) @ question`) gives every distinct text's cosine similarity at once; the closest (≥ `MIN_SIMILARITY` 0.55, a first guess from step 14's check, to tune on real data in step 17) are turned back into rows of the same search table (`_rows_for_chunks`: one query), filtered by course and source, one row per page.
+  - **Reciprocal rank fusion** (`_fuse`): each row scores 1/(60 + rank) in each list it's in, added up; both lists point at the same table rows, so a page found both ways is **one hit** with `found_by: ["keyword", "meaning"]` and rises to the top. Then copies are merged and kinds mixed as before (`_merge_copies`, `_varied`), then `_hits`.
+- **New hit field `meaning_score`** (`models.py`): the cosine similarity for meaning hits (about 0.5 unrelated, higher closer). `matched_words` is empty for meaning-only hits.
+- **Never an error, always an answer (your rule):** if meaning search can't take part, `search_mode = "keyword_only"` and `mode_reason` says why, with "These are keyword results.": nothing embedded yet (checked **before** calling Gemini, so no request is wasted), off, no key, rejected key, per-minute or daily limit (with the SGT reset time), offline, a vector size mismatch, or a search only over titles/posts ("Meaning search covers course files and pages only"). Titles and posts stay keyword-only; posts are never sent to Google.
+- **Coverage** now fills `chunks_with_meaning` / `chunks_total` (distinct texts with a vector / all).
+- **`server.py`:** the instructions describe both searches (`found_by`, `meaning_score`, tell the user `mode_reason` in one line); `search` now uses the normal `READ_ONLY` annotation (open world), since the question goes to Google. **`embeddings.py`:** `GEMINI_MODEL_ID` as a module constant.
+
+**New ideas:**
+
+- **Cosine similarity as a matrix product:** with every vector of length 1, one multiplication of the (texts × 768) matrix by the question's 768 numbers gives all similarities at once.
+- **Reciprocal rank fusion:** merging ranked lists by rank, not by score, so a BM25 score and a cosine similarity (different scales) never have to be compared.
+
+Checks (30 Oct, offline, a toy embedder where "rotation", "rebalanced" and "height" share one idea): checks 1–12 unchanged; 13: no vectors → keyword_only with the reason and no request; 14: "AVL rotation" → `avl.pdf` p.2 found by **both** (first), `balance.pdf` found by **meaning only** (it never says "rotation"), the rest by keyword; 15: the same question again makes no new request; 16: a course filter applies to meaning hits too; 17: announcements only → keyword_only with the reason; 18: daily limit and offline → keyword hits plus the plain reason; 19: no key → the reason. In-process: `search` listed (open world now), works on your real cache: `keyword_only`, "Meaning search has nothing to compare with yet …", **0 of 4,808 texts with meaning** (no Gemini request made). `uv run pytest` → 186 passed, 4 skipped.
+
+Check (PowerShell; nothing here calls Gemini while your cache has no vectors). First `/mcp` → reconnect `ntulearn`.
+
+```
+uv run python -m uni_copilot.ntulearn_mcp.search
+uv run python -m uni_copilot.ntulearn_mcp.search --real "AVL rotation"
+uv run pytest
+```
+
+## Step 17: indexer.py (phase 2: embedding)
+
+**`indexer.py`:** after reading (phase 1, unchanged), **phase 2** embeds:
+
+- `fill_missing_chunks()` and `prune_vectors()` first (local), then `pending_chunks()`: every **distinct** text without a vector (copies once). A line says how many texts, about how many tokens, how many requests, and about how long at the free tier's per-minute caps (`embed_minutes`: tokens ÷ 24,000/min or requests ÷ 80/min, whichever is slower).
+- Batches of 50 to `embed_documents(wait=True)`; **each batch's vectors are saved at once** (`_save_batch`), a progress line every 10 batches.
+- Your rule, in the indexer: per-minute limit → waited out with a line ("waiting 40 s …"); **daily limit, rejected key, offline, Gemini down → embedding stops cleanly** with the reason, how many texts are left ("found by keyword search meanwhile") and the command to carry on; **no key / off → "Embedding skipped: …"**. A Gemini limit isn't an error: exit code 0 (only Ctrl+C or a sign-in problem give 1). Ctrl+C during embedding stops safely too.
+- **New options:** `--embed-only` (no NTULearn at all: no sign-in, no tree; just embed), `--no-embed` (read only, nothing to Gemini), `--max-tokens N` (stop before passing N tokens in this run). `--dry-run` also shows the embedding estimate; `--course` limits embedding to that course's texts too.
+- The summary adds "Embedded X of Y texts (N tokens)" and "meaning search A of B texts".
+- **`docs/how-it-runs.md`:** the indexer section says it embeds, what happens at the daily limit, and the new options.
+
+Checks (30 Oct, offline, fake NTULearn and a fake Gemini, batches of 2): dry run → the estimate line, no vectors; no key → files read, "Embedding skipped: … no GEMINI_API_KEY"; daily limit after 2 batches with `--embed-only` → 4 of 7 embedded, **0 NTULearn requests**, the "waiting 40 s" line, "Embedding stopped: … resets … (Sat 15:00 SGT) … 3 texts left … --embed-only", exit not an error; `--max-tokens 30` stops before the first batch; Ctrl+C during embedding keeps what's done (6 of 7); carrying on embeds the last one; nothing left → 0 requests; `--no-embed` skips; `--course YY` → 0 (no YY texts). Step 12's check still passes. `uv run pytest` → 186 passed, 4 skipped.
+
+**A mistake of mine (30 Oct):** rerunning step 12's offline check script, its indexer had no fake Gemini yet, so it used your real key and sent **2 short made-up test texts** (from the fake course in the check, nothing of yours) to Gemini: 1–2 requests. The script now passes a fake that refuses.
+
+Check (PowerShell). Both are about your real data:
+
+```
+uv run python -m uni_copilot.ntulearn_mcp.indexer --embed-only --dry-run
+uv run python -m uni_copilot.ntulearn_mcp.indexer --embed-only
+```
+
+**Your first run (30 Oct):** dry run "4,808 to embed, about 878,785 tokens in 97 requests, about 37 minutes". The real run: per-minute waits from Gemini ("waiting 59 s for Gemini's per-minute limit") from the start, then **"Embedded 950 of 4,808 texts (172,424 tokens). Embedding stopped: Gemini's free daily limit is used up; it resets at midnight US Pacific time (Fri 15:00 SGT)."** Clean stop, as designed. Search afterwards: `mode: hybrid`, 950 of 4,808 texts with meaning, 4 meaning-only hits at 0.559–0.574 (IE2108 p.3 and p.12, CC0006 p.3 and p.6) between the keyword hits.
+
+**What it showed (verified):**
+
+- **Gemini counts every text as a request, also inside a batch call.** The daily limit came after ~950 texts, and per-minute 429s came with 50-text batches though our pacer counted 1 per batch. So the free tier embeds ~1,000 texts a day: the remaining 3,858 take **about 4 more days** of `--embed-only` (about 12 minutes each).
+- **Fixed at once:** the pacer counts texts (`record(tokens, texts)`, a second batch of 50 within a minute now waits), "waiting 0 s" lines are no longer printed, `EMBED_MAX_REQUESTS_PER_DAY = 1,000`, and the estimate now says "3,858 to embed, about 706,361 tokens: about 12 minutes a day over about 4 days".
+- **Which texts got vectors** (counted in the cache): CC0006 610 of 867, IE2110 238 of 623, CL0105 83 of 156, IE2108 19 of 570, the other four courses 0. **None of the 67 IE2108 texts about AVL has a vector yet**, so the 4 meaning hits at ~0.56 were the closest of what's embedded, not real matches: `MIN_SIMILARITY` 0.55 is too low. To tune once IE2108 is embedded.
+
+**Switched to billing (30 Oct, your choice):** the free tier's ~1,000 texts a day meant ~4 more days. Options weighed: Gemini with billing (same model and code, the 950 vectors stay, ~$0.15 per million tokens ≈ $0.13 for everything, not used to improve Google's products) or OpenRouter (prepaid credits as a hard cap and other models, but a new embedder, everything embedded again, and data terms per provider). **You chose Gemini billing.** Your Google Cloud account is a **free trial** ($383.45 credit, 90 days): the card isn't charged unless you click Upgrade, so the trial itself caps spending; a $1 budget alert as a warning. A monthly spend cap per project exists in AI Studio (Spend page, since March 2026). After linking billing, AI Studio's rate-limit page showed `gemini-embedding-001` at **3,000 requests/min, 1,000,000 tokens/min, unlimited per day** (your peak so far: 100 / 21.12K / 961).
+
+**Changes for it:**
+
+- `config.py`: **`EMBED_LIMITS`** per tier, 80% of Gemini's limits: free (80 texts/min, 24,000 tokens/min, 1,000/day), paid (2,400 texts/min, 800,000 tokens/min, no daily limit); **`UNI_COPILOT_GEMINI_TIER`** in `.env` picks one (`paid`; anything else = free, the safe default: a wrong "free" is only slower); `gemini_tier()`.
+- `embeddings.py`: `make_embedder` paces by the tier; **a new case `spend_cap`**: a 429 whose message mentions "spend" → "Gemini's monthly spend cap for this project is reached; raise it in AI Studio (Spend) or wait for next month" (search falls back to keywords, the indexer stops cleanly). The message text is only searched, never shown.
+- `indexer.py`: the estimate uses the tier: "about 12 minutes on Gemini's free tier, a run a day over about 4 days" or "**about 2 minutes on Gemini's paid tier**".
+- Checks: the spend-cap 429 gives its reason without the key; a paid-tier pacer takes 2,000 texts in a minute without waiting; both estimates printed; step 17's offline checks unchanged. `uv run pytest` → 186 passed, 4 skipped.
+
+**Paid-tier run (30 Oct): Gemini answered 402 RESOURCE_EXHAUSTED on the first batch.** 0 embedded, clean stop; both searches came back `keyword_only` with the reason, as designed. Cause (Google forum and staff replies, not the official docs): the project is on **Prepay** billing, which answers **402** when the prepaid credit is empty, and **free-trial credit can't be used until the minimum prepayment is bought** (the amount varies by country and is shown in AI Studio's billing page); after that, eligible trial credit is used before the prepaid balance. Fixed in the code: a 402 is now its own case `no_credit` with a plain reason ("no prepaid credit (402): buy credit in AI Studio (Billing), or take billing off the project to use the free tier again"). Also "its" added to the stop words (it led "how does a heap keep its order"). Your choice next: buy the minimum prepayment, take billing off (free tier, ~4 daily runs), or OpenRouter.
+
+**Finished (30 Oct, after your S$7 prepayment):** `--embed-only` → "Embedded 3858 of 3858 texts (706,361 tokens)" in **2.0 minutes**; **meaning search 4,808 of 4,808 texts**. Cost about US$0.11 (paid from the trial credit first, per Google's forum; not verified by me).
+
+**Search with everything embedded (your runs):**
+
+- **"AVL rotation"** → `hybrid`; the top hits are all **IE2108 AVL slides found by both** searches (meaning 0.68–0.73). IE2110's "rotation" page, first before, is gone from the top 10. Step 12's problem is solved.
+- **"how does a heap keep its order"** → IE2108 heap slides first, found by both (0.68–0.69), then keyword-only titles and pages.
+
+**`MIN_SIMILARITY` tuned to 0.60** (measured by me: 4 questions, 4 tiny requests, counts and course codes only). Over all 4,808 texts: the median is ~0.46–0.49 (unrelated); an off-topic question ("penguin migration in antarctica") peaks at 0.569 (13 texts ≥ 0.55, **0 ≥ 0.60**); "AVL rotation": 288 texts ≥ 0.55 incl. 27 IE0005 and 4 CC0006, but **114 ≥ 0.60, all IE2108**; heap: 64 ≥ 0.60, all IE2108; "what is the deadline for the group project": CC0006 and ML0004 project pages at 0.60–0.73. The field descriptions and server instructions now say "0.6+ about the topic, 0.7+ close". The offline toy page was made clearer (it scored 0.559 and fell under the new cut-off).
+
+The first sends nothing anywhere: the count and estimate (about 4,808 texts, ~0.7 million tokens, ~97 requests, ~30 minutes). The second sends your course text to Gemini (free tier, as you chose). It answers the open question: if it gets far past ~1,000 texts, a batch counts as one request; if it stops at "daily limit" around 1,000 texts, each text counts, and the rest takes ~4 more days of `--embed-only`. Then:
+
+```
+uv run python -m uni_copilot.ntulearn_mcp.search --real "AVL rotation"
+```
+
 ## Open items
 
 Everything not yet verified in Phase 4. Updated as steps finish.
@@ -944,7 +1029,7 @@ Everything not yet verified in Phase 4. Updated as steps finish.
 
 - **All of "Things to check" in `phase-4-core.md`:** the probe (step 1) answers the NTULearn ones; the Gemini ones are checked in steps 14 and 17.
 - **Resolved (30 Oct, step 14):** Gemini's free-tier data terms re-read; you chose the free tier for course content (billing stays the switch).
-- **Gemini, not verified until step 17:** the 429 answer's exact shape, how a batch counts toward 1,000 requests a day. (Resolved 30 Oct: `embedContentConfig` is ignored; top-level fields work.)
+- **Resolved (30 Oct, step 17):** a batch counts **per text** toward the 1,000 a day (and per minute); the daily 429 was recognised ("PerDay") and stopped the run cleanly. Still to see: whether the per-minute 429s always carry a retry delay (they did on 30 Oct). (Resolved 30 Oct: `embedContentConfig` is ignored; top-level fields work.)
 - **Telegram tool list:** new `ntulearn` tools appear in the locked Telegram session by themselves (the lock limits only built-in tools). Until steps 18–19, a new tool there would wait for a click at the PC.
 
 ## Concepts

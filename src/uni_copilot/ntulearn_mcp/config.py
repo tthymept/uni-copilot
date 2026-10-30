@@ -87,14 +87,26 @@ INDEXER_INTERVAL_S = 2.0
 
 # Embeddings (search by meaning). Gemini's free tier, per Google Cloud project
 # (your AI Studio screenshot, 29 Oct): 100 requests/min, 30,000 tokens/min,
-# 1,000 requests/day. We stay under 80% of the per-minute limits.
+# 1,000 requests/day. We stay under 80% of the per-minute limits. Every TEXT
+# counts as a request, also inside a batch call (seen 30 Oct: the daily
+# limit came after ~950 texts), so "requests" below means texts.
 GEMINI_API_KEY_NAME = "GEMINI_API_KEY"   # the NAME of the .env line; the key itself is never in code
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 EMBED_MODEL = "gemini-embedding-001"
 EMBED_DIMENSIONS = 768                  # shorter vectors than the model's maximum: smaller file, nearly as good
-EMBED_MAX_REQUESTS_PER_MIN = 80
-EMBED_MAX_TOKENS_PER_MIN = 24_000
-EMBED_BATCH_SIZE = 50                   # chunks per request (not verified: how a batch counts toward the daily limit)
+# Our caps per Gemini tier, 80% of Gemini's per-minute limits: (texts per
+# minute, tokens per minute, texts per day or None = no daily limit).
+#   free: 100 / 30,000 / 1,000 a day (AI Studio, 29 Oct)
+#   paid: 3,000 / 1,000,000 / unlimited (AI Studio after linking billing, 30 Oct)
+# Which one: UNI_COPILOT_GEMINI_TIER in .env ("paid"); anything else = free,
+# the safe choice (a wrong "free" only goes slower; Gemini's 429s are waited out).
+GEMINI_TIER_SETTING = "UNI_COPILOT_GEMINI_TIER"
+EMBED_LIMITS: dict[str, tuple[int, int, int | None]] = {
+    "free": (80, 24_000, 1_000),
+    "paid": (2_400, 800_000, None),
+}
+EMBED_MAX_REQUESTS_PER_MIN, EMBED_MAX_TOKENS_PER_MIN, EMBED_MAX_REQUESTS_PER_DAY = EMBED_LIMITS["free"]
+EMBED_BATCH_SIZE = 50                   # texts per call (fewer calls; each text still counts as a request)
 # Chunks: the pieces of text that get one vector each.
 CHUNK_WORDS = 300
 CHUNK_OVERLAP_WORDS = 50
@@ -143,6 +155,13 @@ def _setting(name: str, file_values: dict[str, str]) -> str:
 # Gemini key for embeddings.py. "" if it isn't set. Callers never print it.
 def env_setting(name: str) -> str:
     return _setting(name, _env_file_values())
+
+
+# The Gemini tier from .env ("free" or "paid") and its caps (EMBED_LIMITS).
+def gemini_tier() -> tuple[str, tuple[int, int, int | None]]:
+    tier = env_setting(GEMINI_TIER_SETTING).lower()
+    tier = tier if tier in EMBED_LIMITS else "free"
+    return tier, EMBED_LIMITS[tier]
 
 
 # Where download_file saves: UNI_COPILOT_DOWNLOAD_DIR (environment or .env)

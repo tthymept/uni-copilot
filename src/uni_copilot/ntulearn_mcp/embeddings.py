@@ -62,12 +62,14 @@ from uni_copilot.ntulearn_mcp.config import (
     CHUNK_WORDS,
     EMBED_BATCH_SIZE,
     EMBED_DIMENSIONS,
+    EMBED_LIMITS,
     EMBED_MAX_REQUESTS_PER_MIN,
     EMBED_MAX_TOKENS_PER_MIN,
     EMBED_MODEL,
     GEMINI_API_KEY_NAME,
     GEMINI_BASE_URL,
     env_setting,
+    gemini_tier,
     load_settings,
 )
 from uni_copilot.ntulearn_mcp.models import SGT
@@ -80,7 +82,11 @@ MAX_MINUTE_WAITS = 3         # per-minute 429s waited out in a row before giving
 MAX_WAIT_S = 120             # never wait longer than this for one retry delay
 MAX_SERVER_RETRIES = 2       # Gemini 5xx retried this many times (with a pause) before giving up
 
-UnavailableKind = Literal["off", "no_key", "bad_key", "minute_limit", "daily_limit", "offline", "service"]
+# The Gemini model and vector size, as stored with each vector (cache.vectors).
+GEMINI_MODEL_ID = f"{EMBED_MODEL}@{EMBED_DIMENSIONS}"
+
+UnavailableKind = Literal["off", "no_key", "bad_key", "minute_limit", "daily_limit", "spend_cap", "no_credit",
+                          "offline", "service"]
 
 
 # ---------- 1. Chunks ----------
@@ -201,38 +207,44 @@ def daily_reset_text(now: datetime | None = None) -> str:
 
 # Counts what was sent in the last 60 s and says how long to wait before
 # the next call so both per-minute limits stay under our 80% caps.
+# Gemini counts EVERY TEXT as a request, also inside one batch call (seen
+# 30 Oct: per-minute 429s with batches of 50, and the daily limit after
+# ~950 texts), so a batch of 50 counts 50 here.
 class _MinutePacer:
     def __init__(self, max_requests: int, max_tokens: int, clock: Callable[[], float]):
         self._max_requests, self._max_tokens, self._clock = max_requests, max_tokens, clock
-        self._sent: deque[tuple[float, int]] = deque()     # (time, tokens) per request
+        self._sent: deque[tuple[float, int, int]] = deque()     # (time, tokens, texts) per call
 
-    # Seconds to wait before sending a request of `tokens` tokens (0 = now).
-    def wait_for(self, tokens: int) -> float:
+    # Seconds to wait before a call with `texts` texts of `tokens` tokens (0 = now).
+    def wait_for(self, tokens: int, texts: int = 1) -> float:
         now = self._clock()
         while self._sent and now - self._sent[0][0] >= 60:
             self._sent.popleft()
-        used = sum(t for _, t in self._sent)
-        if len(self._sent) < self._max_requests and used + tokens <= self._max_tokens:
+        used_tokens = sum(t for _, t, _ in self._sent)
+        used_texts = sum(n for _, _, n in self._sent)
+        if used_texts + texts <= self._max_requests and used_tokens + tokens <= self._max_tokens:
             return 0.0
-        if not self._sent:            # one request bigger than the whole cap: send it alone
+        if not self._sent:            # one call bigger than a whole cap: send it alone
             return 0.0
-        # Wait until enough of the oldest requests are a minute old: after the
+        # Wait until enough of the oldest calls are a minute old: after the
         # i-th oldest drops out, are both counts under the caps?
-        left_tokens, wait = used, 0.0
-        for i, (at, t) in enumerate(self._sent, 1):
+        left_tokens, left_texts, wait = used_tokens, used_texts, 0.0
+        for at, t, n in self._sent:
             left_tokens -= t
+            left_texts -= n
             wait = 60 - (now - at)
-            if len(self._sent) - i < self._max_requests and left_tokens + tokens <= self._max_tokens:
+            if left_texts + texts <= self._max_requests and left_tokens + tokens <= self._max_tokens:
                 break
         return max(0.0, wait)
 
-    def record(self, tokens: int) -> None:
-        self._sent.append((self._clock(), tokens))
+    def record(self, tokens: int, texts: int = 1) -> None:
+        self._sent.append((self._clock(), tokens, texts))
 
 
 # Reads Gemini's error answer: (HTTP status, status word like
 # RESOURCE_EXHAUSTED, quota ids like "...PerDay...", retry delay in seconds).
-# Only these parts are kept; the message text isn't shown to anyone.
+# Only these parts are kept; the message text is only searched for words
+# like "spend" (the spend cap), never shown to anyone.
 def _read_error(response: requests.Response) -> tuple[int, str, list[str], float | None]:
     try:
         error = response.json().get("error", {})
@@ -251,6 +263,8 @@ def _read_error(response: requests.Response) -> tuple[int, str, list[str], float
         reason = detail.get("reason")
         if reason:
             quota_ids.append(str(reason))
+    if "spend" in str(error.get("message") or "").lower():
+        quota_ids.append("spend")
     return response.status_code, str(error.get("status") or ""), quota_ids, retry
 
 
@@ -258,12 +272,14 @@ class GeminiEmbedder:
     # `api_key` from make_embedder (never printed). `session`, `clock` and
     # `sleep` are swapped for fakes in the self-test.
     def __init__(self, api_key: str, session: requests.Session | None = None,
-                 clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep):
+                 clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
+                 limits: tuple[int, int, int | None] | None = None):
         self._session = session or requests.Session()
         self._session.headers.update({"x-goog-api-key": api_key, "Content-Type": "application/json"})
         self._clock, self._sleep = clock, sleep
-        self._pacer = _MinutePacer(EMBED_MAX_REQUESTS_PER_MIN, EMBED_MAX_TOKENS_PER_MIN, clock)
-        self.model_id = f"{EMBED_MODEL}@{EMBED_DIMENSIONS}"
+        per_min, tokens_per_min, _ = limits or (EMBED_MAX_REQUESTS_PER_MIN, EMBED_MAX_TOKENS_PER_MIN, None)
+        self._pacer = _MinutePacer(per_min, tokens_per_min, clock)
+        self.model_id = GEMINI_MODEL_ID
 
     # Vectors for chunks (as RETRIEVAL_DOCUMENT, with their titles), in
     # batches of EMBED_BATCH_SIZE, in the same order. wait=True (the indexer)
@@ -276,7 +292,8 @@ class GeminiEmbedder:
             batch = chunks[start:start + EMBED_BATCH_SIZE]
             requests_ = [self._request(c.text, "RETRIEVAL_DOCUMENT", c.title) for c in batch]
             tokens = sum(estimate_tokens(c.title + " " + c.text) for c in batch)
-            answer = self._post("batchEmbedContents", {"requests": requests_}, tokens, wait, on_wait)
+            answer = self._post("batchEmbedContents", {"requests": requests_}, tokens, wait, on_wait,
+                                texts=len(batch))
             got = answer.get("embeddings") or []
             if len(got) != len(batch):
                 raise EmbeddingUnavailable("service", f"Gemini answered {len(got)} vectors for {len(batch)} texts.")
@@ -317,18 +334,19 @@ class GeminiEmbedder:
     # One call to Gemini, paced, with the limit cases told apart. Returns the
     # JSON answer or raises EmbeddingUnavailable.
     def _post(self, method: str, body: dict, tokens: int, wait: bool,
-              on_wait: Callable[[str], None] | None) -> dict:
+              on_wait: Callable[[str], None] | None, texts: int = 1) -> dict:
         url = f"{GEMINI_BASE_URL}/models/{EMBED_MODEL}:{method}"
         minute_waits = server_retries = 0
         while True:
-            pause = self._pacer.wait_for(tokens)
+            pause = self._pacer.wait_for(tokens, texts)
             if pause > 0:
                 if not wait:
                     raise EmbeddingUnavailable(
                         "minute_limit", "Meaning search is busy for a moment (Gemini's per-minute limit).", pause)
-                self._say(on_wait, f"waiting {pause:.0f} s to stay under Gemini's per-minute limit")
+                if pause >= 1:                    # a fraction of a second isn't worth a line
+                    self._say(on_wait, f"waiting {pause:.0f} s to stay under Gemini's per-minute limit")
                 self._sleep(pause)
-            self._pacer.record(tokens)
+            self._pacer.record(tokens, texts)
             try:
                 response = self._session.post(url, json=body, timeout=TIMEOUT_S)
             except requests.RequestException as e:
@@ -342,6 +360,14 @@ class GeminiEmbedder:
                     raise EmbeddingUnavailable("service", "Gemini's answer wasn't readable.") from None
             status, word, quota_ids, retry = _read_error(response)
             joined = " ".join(quota_ids).lower()
+            if status == 402:                      # Prepay billing with no credit (seen 30 Oct)
+                raise EmbeddingUnavailable(
+                    "no_credit", "Gemini says this project has no prepaid credit (402): buy credit in AI Studio "
+                                 "(Billing), or take billing off the project to use the free tier again.")
+            if status == 429 and "spend" in joined:
+                raise EmbeddingUnavailable(
+                    "spend_cap", "Gemini's monthly spend cap for this project is reached; raise it in AI Studio "
+                                 "(Spend) or wait for next month.")
             if status == 429 and "perday" in joined:
                 raise EmbeddingUnavailable(
                     "daily_limit", f"Gemini's free daily limit is used up; it resets {daily_reset_text()}.")
@@ -380,7 +406,7 @@ def make_embedder() -> Embedder:
     key = env_setting(GEMINI_API_KEY_NAME)
     if not key:
         raise EmbeddingUnavailable("no_key", f"Meaning search isn't set up: no {GEMINI_API_KEY_NAME} in .env.")
-    return GeminiEmbedder(key)
+    return GeminiEmbedder(key, limits=gemini_tier()[1])
 
 
 # ---------- Self-test ----------
@@ -461,6 +487,9 @@ def _offline() -> None:
         ("no internet", [requests.ConnectionError("SECRET-KEY in a message")], "docs"),
         ("Gemini down", [(503, {}), (503, {}), (503, {})], "docs"),
         ("wrong vector size", [(200, {"embeddings": [{"values": [0.1] * 3072}]})], "docs"),
+        ("no prepaid credit", [(402, {"error": {"status": "RESOURCE_EXHAUSTED"}})], "docs"),
+        ("spend cap", [(429, {"error": {"status": "RESOURCE_EXHAUSTED",
+                                        "message": "Your project has exceeded its monthly spending cap."}})], "docs"),
     ]
     for name, answers, call in cases:
         e = GeminiEmbedder("SECRET-KEY", _FakeSession(answers), clock, sleep)
@@ -475,13 +504,21 @@ def _offline() -> None:
     p = _MinutePacer(EMBED_MAX_REQUESTS_PER_MIN, EMBED_MAX_TOKENS_PER_MIN, clock)
     for _ in range(EMBED_MAX_REQUESTS_PER_MIN):
         p.record(10)
-    print(f"6) pacer: request 81 within the minute waits {p.wait_for(10):.0f} s; ", end="")
+    p3 = _MinutePacer(EMBED_MAX_REQUESTS_PER_MIN, EMBED_MAX_TOKENS_PER_MIN, clock)
+    p3.record(500, texts=50)
+    print(f"6) pacer: a 2nd batch of 50 texts within the minute waits {p3.wait_for(500, 50):.0f} s (texts count); "
+          f"request 81 waits {p.wait_for(10):.0f} s; ", end="")
     p2 = _MinutePacer(EMBED_MAX_REQUESTS_PER_MIN, EMBED_MAX_TOKENS_PER_MIN, clock)
     p2.record(20_000)
     t[0] += 45
     print(f"5,000 tokens 45 s after 20,000 (cap {EMBED_MAX_TOKENS_PER_MIN:,}) waits {p2.wait_for(5_000):.0f} s; "
           f"1,000 tokens go now: {p2.wait_for(1_000) == 0}")
     print(f"7) daily reset: {daily_reset_text()}")
+    fast = GeminiEmbedder("k", _FakeSession([]), clock, sleep, limits=EMBED_LIMITS["paid"])
+    print(f"8) tiers: {EMBED_LIMITS}; a paid-tier pacer takes 2,000 texts in a minute without waiting: ", end="")
+    for _ in range(40):
+        fast._pacer.record(1_000, texts=50)
+    print(fast._pacer.wait_for(1_000, 50) == 0)
 
 
 # Live: one batch of 3 made-up sentences and 1 question (2 requests). Prints

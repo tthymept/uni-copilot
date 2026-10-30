@@ -416,7 +416,11 @@ class SearchHit(_Model):
     found_by: list[Literal["keyword", "meaning"]]
     matched_words: list[str] = Field(
         default_factory=list, description="Which of the search words this hit contains (a word also finds "
-                                          "its other forms: 'rotations' finds 'rotation').")
+                                          "its other forms: 'rotations' finds 'rotation'). Empty when "
+                                          "only meaning search found it.")
+    meaning_score: float | None = Field(
+        default=None, description="For hits found by meaning: how close the text is to the question "
+                                  "(cosine similarity: about 0.5 unrelated, 0.6+ about the topic, 0.7+ close).")
     also_in: list[str] = Field(
         default_factory=list, description=UNTRUSTED + " Other places with exactly the same text (course code "
                                           "and title), e.g. the same file attached several times.")

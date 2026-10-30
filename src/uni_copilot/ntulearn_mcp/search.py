@@ -1,6 +1,6 @@
 """
-Keyword search over everything the content cache holds, plus your
-announcements and messages. Never contacts NTULearn.
+Search over everything the content cache holds, plus your announcements and
+messages: keyword search and meaning search together. Never contacts NTULearn.
 
 In plain words:
   Browsing (list_course_content, read_file_text) answers "read this place".
@@ -37,8 +37,24 @@ How:
     files are read out of how many known, how many posts, and when the
     indexer last finished. A miss with low coverage means "not indexed yet",
     not "not there".
-  - search_mode: keyword_only until meaning search (embeddings) is built in
-    steps 14-17; mode_reason says so.
+
+Meaning search (step 16), next to the keywords:
+  - Your question becomes a vector (Gemini, 1 request; the same question
+    again within this session is remembered, no request). Every chunk's
+    vector (cache.vector_matrix) is compared with it at once: one matrix
+    multiplication gives each chunk's cosine similarity (vectors have length
+    1, so that's a dot product). The closest chunks above MIN_SIMILARITY win.
+  - It covers course files and pages (the chunks); titles and posts are
+    keyword-only (posts are never sent to Google).
+  - The two ranked lists are merged by reciprocal rank fusion (RRF): each
+    hit scores 1/(60 + its rank) in every list it's in, added up. A hit both
+    searches found rises to the top; a hit only one found keeps its place.
+    Both lists point at rows of the same search table, so the same page found
+    both ways is one hit with found_by ["keyword", "meaning"].
+  - search_mode is "hybrid" when meaning search took part, else
+    "keyword_only" with mode_reason in plain words: off, no key, no vectors
+    yet, Gemini's limits (when the daily one resets), offline, or a search
+    only over titles/posts. Never an error: keyword results always come back.
 
 Untrusted: titles and snippets are other people's text. Nothing here acts on them.
 """
@@ -49,8 +65,20 @@ import sys
 import sqlite3
 from pathlib import Path
 
+import threading
+from collections import OrderedDict
+from collections.abc import Callable
+
+import numpy as np
+
 from uni_copilot.ntulearn_mcp.cache import ContentCache, time_from_db
 from uni_copilot.ntulearn_mcp.config import DATA_DIR, DATA_EXTENSIONS
+from uni_copilot.ntulearn_mcp.embeddings import (
+    GEMINI_MODEL_ID,
+    Embedder,
+    EmbeddingUnavailable,
+    make_embedder,
+)
 from uni_copilot.ntulearn_mcp.models import SearchCoverage, SearchHit, SearchResults, SearchSource, course_url
 from uni_copilot.ntulearn_mcp.parsers.files import TEXT_EXTENSIONS
 
@@ -67,12 +95,21 @@ TITLE_WEIGHT = 5.0      # a match in a title counts this many times a match in t
 SNIPPET_WORDS = 14
 WORD_RE = re.compile(r"\w+", re.UNICODE)
 MATCH_START, MATCH_END = "\x02", "\x03"   # FTS5 marks matches with these first
-NO_MEANING_YET = "Meaning search isn't built yet (Phase 4 steps 14-17); these are keyword results."
+KEYWORD_RESULTS = "These are keyword results."
+RRF_K = 60              # reciprocal rank fusion's usual constant: rank 1 scores 1/61, rank 10 1/70
+# Below this cosine similarity a chunk isn't "about" the question. Measured
+# on your 4,808 texts (30 Oct): unrelated text sits at ~0.46-0.49 (median),
+# an off-topic question ("penguin migration in antarctica") peaks at 0.57,
+# and on-topic slides score 0.60-0.73 ("AVL rotation": 114 texts >= 0.60,
+# all IE2108; at 0.55 unrelated IE0005/CC0006 texts crept in).
+MIN_SIMILARITY = 0.60
+MEANING_SOURCES = {"file", "page"}   # what has chunks
+QUERY_MEMORY = 64       # question vectors remembered, so repeating a search costs no request
 # Question words and glue: they match almost every row, so they'd decide the
 # "most words matched" order without saying anything about the topic.
 STOP_WORDS = {
     "a", "an", "and", "are", "about", "as", "at", "be", "by", "can", "do", "does", "for", "from", "how",
-    "i", "in", "is", "it", "me", "my", "of", "on", "or", "the", "this", "that", "to", "was", "what",
+    "i", "in", "is", "it", "its", "me", "my", "of", "on", "or", "the", "this", "that", "to", "was", "what",
     "when", "where", "which", "who", "why", "with",
 }
 
@@ -122,6 +159,31 @@ def _merge_copies(rows: list) -> list[tuple]:
     return list(groups.values())
 
 
+# A search-table row as a plain dict (the columns both lists share).
+def _plain(r) -> dict:
+    return {k: r[k] for k in ("rowid", "source", "title", "body", "course_code", "site_id", "content_id",
+                              "file_ref", "page", "event_id")}
+
+
+# Reciprocal rank fusion: merges the keyword and meaning lists (rows of the
+# same table, so the same rowid is the same place). Each row scores
+# 1/(RRF_K + rank) per list it's in; best total first. A row in both keeps the
+# keyword version (bold snippet, matched words) plus the meaning score.
+def _fuse(keyword: list[dict], meaning: list[dict]) -> list[dict]:
+    total: dict[int, float] = {}
+    merged: dict[int, dict] = {}
+    for name, rows in (("keyword", keyword), ("meaning", meaning)):
+        for rank, row in enumerate(rows, 1):
+            rid = row["rowid"]
+            total[rid] = total.get(rid, 0.0) + 1.0 / (RRF_K + rank)
+            if rid in merged:
+                merged[rid]["found_by"].append(name)
+                merged[rid]["score"] = merged[rid]["score"] or row["score"]
+            else:
+                merged[rid] = {**row, "found_by": [name]}
+    return [merged[rid] for rid in sorted(merged, key=lambda rid: -total[rid])]
+
+
 # Mixes kinds of hit: rows come best first; no single source (title, file,
 # page, announcement, message) may take more than half of `limit`, unless
 # nothing else matched. Without this, short title rows (weighted 5x) can
@@ -141,11 +203,19 @@ def _varied(rows: list[tuple], limit: int) -> list[tuple]:
     return picked + held[:limit - len(picked)]
 
 
-class KeywordSearch:
-    # Keeps the cache and where the event store is (tests pass temporary files).
-    def __init__(self, cache: ContentCache, store_path: Path | str = STORE_PATH):
+class ContentSearch:
+    # Keeps the cache and where the event store is (tests pass temporary
+    # files), and how to get an embedder (made on the first search that needs
+    # one; if that fails, e.g. no key yet, it's tried again next time).
+    def __init__(self, cache: ContentCache, store_path: Path | str = STORE_PATH,
+                 embedder_factory: Callable[[], Embedder] = make_embedder, model_id: str = GEMINI_MODEL_ID):
         self._cache = cache
         self._store_path = Path(store_path)
+        self._embedder_factory = embedder_factory
+        self._model_id = model_id
+        self._embedder: Embedder | None = None
+        self._queries: OrderedDict[str, np.ndarray] = OrderedDict()
+        self._lock = threading.Lock()      # tools run in worker threads; one Gemini call at a time
 
     # The entry point. `course`: part of a course code ("IE2108", "2108"),
     # matched against the courses the cache and store know. `sources`: only
@@ -159,15 +229,14 @@ class KeywordSearch:
         codes = self._known_codes()
         course_code = self._pick_code(course, codes) if course else None
         words = query_words(query)
-        all_words, any_word = match_queries(words)
-        hits = self._run(all_words, words, course_code, sources, limit, every_word=True)
-        if not hits and len(words) > 1:
-            hits = self._run(any_word, words, course_code, sources, limit, every_word=False)
-            if hits:
-                notes.append("No result had all the words; these match some of them, most words first "
-                             "(see matched_words).")
-        return SearchResults(query=query, search_mode="keyword_only", mode_reason=NO_MEANING_YET,
-                             hits=hits, coverage=self.coverage(codes), notes=notes)
+        keyword, every_word = self._keyword_rows(words, course_code, sources, limit)
+        if keyword and not every_word:
+            notes.append("No result had all the words; these match some of them, most words first "
+                         "(see matched_words).")
+        meaning, reason = self._meaning_rows(query, course_code, sources, limit)
+        picked = _varied(_merge_copies(_fuse(keyword, meaning)), limit)
+        return SearchResults(query=query, search_mode="keyword_only" if reason else "hybrid", mode_reason=reason,
+                             hits=self._hits(picked), coverage=self.coverage(codes), notes=notes)
 
     # ----- Posts from the event store -----
 
@@ -218,10 +287,19 @@ class KeywordSearch:
 
     # ----- Querying -----
 
+    # The keyword list: rows with all the words (every_word=True), or if
+    # none, rows with any of them. Returns (rows best first, every_word).
+    def _keyword_rows(self, words: list[str], course_code: str | None, sources: list[str] | None,
+                      limit: int) -> tuple[list[dict], bool]:
+        all_words, any_word = match_queries(words)
+        rows = self._fts(all_words, words, course_code, sources, limit, every_word=True)
+        if rows or len(words) == 1:
+            return rows, True
+        return self._fts(any_word, words, course_code, sources, limit, every_word=False), False
+
     # One FTS5 query: matching rows, best first, filtered by course and
-    # source, copies merged, each turned into a SearchHit with a snippet
-    # (matched words in **bold**) from the text, or from the title when only
-    # the title matched.
+    # source, as dicts with a snippet (matched words in **bold**) from the
+    # text, or from the title when only the title matched, and matched_words.
     #   Order: rows with more of the words first (every_word=False only; with
     #   every_word=True all rows have them all), then BM25 with titles weighted.
     #   Which words a row has: one small lookup per word,
@@ -230,11 +308,11 @@ class KeywordSearch:
     #   (char 2 and 3), so we can tell whether the text or only the title
     #   matched, then they become ** (plain ASCII, fine on Telegram and in
     #   any console).
-    def _run(self, match: str, words: list[str], course_code: str | None, sources: list[str] | None,
-             limit: int, every_word: bool) -> list[SearchHit]:
+    def _fts(self, match: str, words: list[str], course_code: str | None, sources: list[str] | None,
+             limit: int, every_word: bool) -> list[dict]:
         has_word = "" if every_word else "".join(
             f", rowid IN (SELECT rowid FROM search_text WHERE search_text MATCH ?) AS w{i}" for i in range(len(words)))
-        sql = ("SELECT source, title, body, course_code, site_id, content_id, file_ref, page, event_id, "
+        sql = ("SELECT rowid, source, title, body, course_code, site_id, content_id, file_ref, page, event_id, "
                f"snippet(search_text, 1, char(2), char(3), '...', {SNIPPET_WORDS}) AS body_snip, "
                f"snippet(search_text, 0, char(2), char(3), '...', {SNIPPET_WORDS}) AS title_snip"
                f"{has_word} FROM search_text WHERE search_text MATCH ?"
@@ -251,17 +329,102 @@ class KeywordSearch:
         sql += f" ORDER BY {most_words}bm25(search_text, {TITLE_WEIGHT}, 1.0) LIMIT ?"
         params.append(limit * 8)   # more than needed: copies merge, and _varied mixes kinds
         with self._cache._connect() as conn:
-            rows = _varied(_merge_copies(conn.execute(sql, params).fetchall()), limit)
-        urls = self._post_urls([r["event_id"] for r, _ in rows if r["event_id"]])
+            rows = conn.execute(sql, params).fetchall()
+        found = []
+        for r in rows:
+            body_snip, title_snip = r["body_snip"] or "", r["title_snip"] or ""
+            snippet = body_snip if MATCH_START in body_snip else title_snip
+            found.append({**_plain(r), "snippet": snippet.replace(MATCH_START, "**").replace(MATCH_END, "**"),
+                          "matched": words if every_word else [w for i, w in enumerate(words) if r[f"w{i}"]],
+                          "score": None})
+        return found
+
+    # The meaning list: the chunks closest to the question, as rows of the
+    # same search table (so they can be merged with the keyword list).
+    # Returns (rows best first, None), or ([], reason) when meaning search
+    # can't take part: the reason, in plain words, becomes mode_reason.
+    def _meaning_rows(self, query: str, course_code: str | None, sources: list[str] | None,
+                      limit: int) -> tuple[list[dict], str | None]:
+        if sources and not MEANING_SOURCES & set(sources):
+            return [], f"Meaning search covers course files and pages only. {KEYWORD_RESULTS}"
+        done, _ = self._cache.embedding_counts(self._model_id)
+        if done == 0:
+            return [], ("Meaning search has nothing to compare with yet: the indexer hasn't embedded any "
+                        f"course text. {KEYWORD_RESULTS}")
+        try:
+            question = self._question_vector(query)
+        except EmbeddingUnavailable as e:
+            return [], f"{e.reason} {KEYWORD_RESULTS}"
+        hashes, matrix = self._cache.vector_matrix(self._model_id)
+        if matrix.shape[0] == 0:
+            return [], f"Meaning search has nothing to compare with yet. {KEYWORD_RESULTS}"
+        if matrix.shape[1] != question.shape[0]:
+            return [], f"The stored vectors don't match the model (re-embed with the indexer). {KEYWORD_RESULTS}"
+        similarity = matrix @ question                     # one number per distinct text
+        best = [i for i in np.argsort(-similarity)[:limit * 8] if similarity[i] >= MIN_SIMILARITY]
+        places = self._cache.chunks_by_hash([hashes[i] for i in best])
+        wanted = []                                        # (chunk, similarity), best first
+        for i in best:
+            for chunk in places.get(hashes[i], []):
+                if course_code and chunk.course_code != course_code:
+                    continue
+                if sources and chunk.source not in sources:
+                    continue
+                wanted.append((chunk, float(similarity[i])))
+        rows = self._rows_for_chunks([c for c, _ in wanted])
+        found, seen = [], set()
+        for chunk, score in wanted:
+            row = rows.get((chunk.source, chunk.site_id, chunk.content_id, chunk.file_ref, chunk.page))
+            if row is None or row["rowid"] in seen:        # a later part of a page already listed
+                continue
+            seen.add(row["rowid"])
+            words = chunk.text.split()
+            snippet = " ".join(words[:SNIPPET_WORDS * 2]) + (" ..." if len(words) > SNIPPET_WORDS * 2 else "")
+            found.append({**row, "snippet": snippet, "matched": [], "score": round(score, 3)})
+        return found, None
+
+    # The question's vector: remembered for the last QUERY_MEMORY questions,
+    # else 1 Gemini request (never waits for a limit: a search reports it).
+    def _question_vector(self, query: str) -> np.ndarray:
+        key = " ".join(query.lower().split())
+        with self._lock:
+            if key in self._queries:
+                self._queries.move_to_end(key)
+                return self._queries[key]
+            if self._embedder is None:
+                self._embedder = self._embedder_factory()
+            vector = self._embedder.embed_query(query)
+            self._queries[key] = vector
+            if len(self._queries) > QUERY_MEMORY:
+                self._queries.popitem(last=False)
+            return vector
+
+    # The search-table rows of some chunks' pages (one query): keyed by
+    # (source, site, content id, file_ref, page) as chunks name them.
+    def _rows_for_chunks(self, chunks: list) -> dict[tuple, dict]:
+        ids = sorted({c.content_id for c in chunks})
+        if not ids:
+            return {}
+        rows: dict[tuple, dict] = {}
+        with self._cache._connect() as conn:
+            for start in range(0, len(ids), 500):
+                part = ids[start:start + 500]
+                for r in conn.execute(
+                        "SELECT rowid, source, title, body, course_code, site_id, content_id, file_ref, page, event_id "
+                        f"FROM search_text WHERE source IN ('file', 'page') AND content_id IN "
+                        f"({','.join('?' * len(part))})", part):
+                    page = int(r["page"]) if r["page"] is not None else None
+                    rows[(r["source"], r["site_id"], r["content_id"], r["file_ref"] or None, page)] = _plain(r)
+        return rows
+
+    # The picked rows as SearchHits: links, also_in, found_by, scores.
+    def _hits(self, picked: list[tuple]) -> list[SearchHit]:
+        urls = self._post_urls([r["event_id"] for r, _ in picked if r["event_id"]])
         hits = []
-        for r, also_in in rows:
-            matched = words if every_word else [w for i, w in enumerate(words) if r[f"w{i}"]]
+        for r, also_in in picked:
             others = list(dict.fromkeys(also_in))
             if len(others) > MAX_ALSO_IN:
                 others = others[:MAX_ALSO_IN] + [f"and {len(others) - MAX_ALSO_IN} more"]
-            body_snip, title_snip = r["body_snip"] or "", r["title_snip"] or ""
-            snippet = body_snip if MATCH_START in body_snip else title_snip
-            snippet = snippet.replace(MATCH_START, "**").replace(MATCH_END, "**")
             if r["event_id"] and r["event_id"] in urls:
                 url = urls[r["event_id"]]                  # a post: its own link
             elif r["site_id"]:
@@ -270,9 +433,10 @@ class KeywordSearch:
                 url = ""
             hits.append(SearchHit(
                 source=r["source"], course_code=r["course_code"] or "", title=r["title"] or "",
-                snippet=" ".join(snippet.split()), content_id=r["content_id"], file_ref=r["file_ref"],
+                snippet=" ".join(r["snippet"].split()), content_id=r["content_id"], file_ref=r["file_ref"],
                 page=int(r["page"]) if r["page"] is not None else None, event_id=r["event_id"],
-                found_by=["keyword"], matched_words=matched, also_in=others, url=url,
+                found_by=r["found_by"], matched_words=r["matched"], meaning_score=r["score"],
+                also_in=others, url=url,
             ))
         return hits
 
@@ -311,7 +475,7 @@ class KeywordSearch:
         return SearchCoverage(
             courses_indexed=len(counts["codes"]), courses_total=max(len(codes), len(counts["codes"])),
             pages=counts["pages"], files=counts["files"], files_known=counts["files_known"], posts=counts["posts"],
-            chunks_with_meaning=0, chunks_total=0,
+            **dict(zip(("chunks_with_meaning", "chunks_total"), self._cache.embedding_counts(self._model_id))),
             indexed_at=time_from_db(self._cache.get_state("indexer_finished_at")),
         )
 
@@ -326,21 +490,53 @@ def _main() -> None:
 
     from uni_copilot.ntulearn_mcp.models import ContentItem, Release
 
-    ap = argparse.ArgumentParser(description="Self-test of keyword search.")
+    ap = argparse.ArgumentParser(description="Self-test of search (keyword and meaning).")
     ap.add_argument("--real", metavar="WORDS", help="search your real cache for these words (counts only)")
     args = ap.parse_args()
     sys.stdout.reconfigure(errors="replace")   # a Windows console may lack some characters
     if args.real:
-        result = KeywordSearch(ContentCache()).search(args.real, limit=10)
+        result = ContentSearch(ContentCache()).search(args.real, limit=10)
         c = result.coverage
         print(f"coverage: {c.courses_indexed} of {c.courses_total} courses with a cached tree, {c.pages} pages, "
-              f"{c.files} of {c.files_known} known files read, {c.posts} posts; notes: {result.notes or 'none'}")
+              f"{c.files} of {c.files_known} known files read, {c.posts} posts, {c.chunks_with_meaning} of "
+              f"{c.chunks_total} texts with meaning; notes: {result.notes or 'none'}")
+        print(f"mode: {result.search_mode}; reason: {result.mode_reason or 'none'}")
         for h in result.hits:
-            print(f"   {h.source:12} {h.course_code:7} page={h.page} matched={h.matched_words} "
-                  f"copies={len(h.also_in)} snippet {len(h.snippet)} characters")
+            print(f"   {h.source:12} {h.course_code:7} page={h.page} found_by={h.found_by} matched={h.matched_words} "
+                  f"meaning={h.meaning_score} copies={len(h.also_in)} snippet {len(h.snippet)} characters")
         return
 
     now = datetime(2026, 10, 30, 2, 0, tzinfo=timezone.utc)
+
+    # Embedders for the offline test. _no_key: as if .env had no key.
+    # _FakeEmbedder: a toy "meaning": words of one idea share a dimension
+    # (rotation / rebalanced / height are one idea, avl / tree another), so
+    # "AVL rotation" is close to a page that never says "rotation".
+    def _no_key():
+        raise EmbeddingUnavailable("no_key", "Meaning search isn't set up: no GEMINI_API_KEY in .env.")
+
+    class _FakeEmbedder:
+        model_id = "fake@8"
+        IDEAS = {"rotation": 0, "rotations": 0, "rotate": 0, "rebalanced": 0, "height": 0, "balanced": 0,
+                 "avl": 1, "tree": 1, "trees": 1, "subtrees": 1, "penguin": 2, "zoo": 2}
+
+        def __init__(self, fail: EmbeddingUnavailable | None = None):
+            self.fail, self.calls = fail, 0
+
+        def _vec(self, text: str) -> np.ndarray:
+            v = np.zeros(8, dtype=np.float32)
+            for w in WORD_RE.findall(text.lower()):
+                v[self.IDEAS.get(w, 3 + sum(map(ord, w)) % 5)] += 1
+            return v / (np.linalg.norm(v) or 1)
+
+        def embed_documents(self, chunks, wait=True, on_wait=None):
+            return [self._vec(c.text) for c in chunks]
+
+        def embed_query(self, text):
+            self.calls += 1
+            if self.fail:
+                raise self.fail
+            return self._vec(text)
     with tempfile.TemporaryDirectory() as tmp:
         store = Path(tmp) / "store.sqlite"
         conn = sqlite3.connect(store)
@@ -363,7 +559,7 @@ def _main() -> None:
         cache.save_tree("_1_1", "XX1000", [item], now)
         cache.save_file_text("_1_1", "XX1000", "_10_1", "_77_1", "avl.pdf", "pdf",
                              ["AVL trees", "A rotation keeps the tree balanced.", "Insertion and rotations"], None, now)
-        search = KeywordSearch(cache, store)
+        search = ContentSearch(cache, store, embedder_factory=_no_key)
 
         r = search.search("AVL rotations")
         print(f"1) 'AVL rotations': {len(r.hits)} hits, mode {r.search_mode}")
@@ -403,6 +599,41 @@ def _main() -> None:
         print(f"11) coverage leaves the csv out: files {r.coverage.files} of {r.coverage.files_known} known")
         print(f"12) words of 'What is a rotation?': {query_words('What is a rotation?')}; "
               f"of 'what is it': {query_words('what is it')}")
+
+        # Step 16: meaning search next to the keywords.
+        print(f"13) no vectors yet: mode {r.search_mode}; reason: {r.mode_reason}")
+        balance = ContentItem(id="_30_1", course_code="XX1000", course_site_id="_1_1", title="Balancing",
+                              kind="file", release=Release(state="open"), file_name="balance.pdf")
+        cache.save_tree("_1_1", "XX1000", [item, copy, data, balance], now)
+        cache.save_file_text("_1_1", "XX1000", "_30_1", "_90_1", "balance.pdf", "pdf",
+                             ["AVL tree rebalanced by height after insertion"],
+                             None, now)
+        fake = _FakeEmbedder()
+        todo = cache.pending_chunks(fake.model_id)
+        cache.save_vectors(fake.model_id, [(c.text_hash, v) for c, v in zip(todo, fake.embed_documents(todo))], now)
+        hybrid = ContentSearch(cache, store, embedder_factory=lambda: fake, model_id=fake.model_id)
+        r = hybrid.search("AVL rotation")
+        print(f"14) 'AVL rotation', {r.search_mode}, {r.coverage.chunks_with_meaning} of "
+              f"{r.coverage.chunks_total} texts with meaning:")
+        for h in r.hits:
+            print(f"   {h.source:12} {h.title!r:16} page={h.page} found_by={h.found_by} "
+                  f"matched={h.matched_words} meaning={h.meaning_score}")
+        hybrid.search("AVL rotation")
+        print(f"15) the same question again: Gemini asked {fake.calls} time(s) in all")
+        r = hybrid.search("penguin rebalanced", course="yy")
+        print(f"16) course 'yy' only: {[(h.course_code, h.found_by) for h in r.hits]}")
+        r = hybrid.search("rotation", sources=["announcement"])
+        print(f"17) announcements only: {r.search_mode}; {r.mode_reason}")
+        for fail in (EmbeddingUnavailable("daily_limit", "Gemini's free daily limit is used up; it resets at "
+                                          "midnight US Pacific time (Sat 15:00 SGT)."),
+                     EmbeddingUnavailable("offline", "Gemini couldn't be reached (ConnectionError): no internet, "
+                                          "or Google is down.")):
+            broken = ContentSearch(cache, store, embedder_factory=lambda f=fail: _FakeEmbedder(f),
+                                   model_id=fake.model_id)
+            r = broken.search("AVL rotation")
+            print(f"18) {fail.kind}: {r.search_mode}, {len(r.hits)} keyword hits; reason: {r.mode_reason}")
+        r = ContentSearch(cache, store, embedder_factory=_no_key, model_id=fake.model_id).search("AVL rotation")
+        print(f"19) no key: {r.search_mode}; reason: {r.mode_reason}")
 
 
 if __name__ == "__main__":

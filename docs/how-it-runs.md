@@ -54,7 +54,8 @@ Status: 30 Oct 2026 (Phase 3 test week; Phase 4 indexer added, run by hand). All
 
 - **Runs:** only when you start it: `uv run python -m uni_copilot.ntulearn_mcp.indexer` (`--dry-run` first shows what it would read and how long). It reads every course's slides, PDFs, notebooks and text files into `.data\cache\content.sqlite`, which `search` uses. Data files (`.csv`) are left out.
 - **First run** ~1 hour (1 request every 2 s); later runs only read what's new or changed, usually a few minutes. Safe to stop with Ctrl+C or to sleep the laptop: everything read is kept, and the next run carries on.
-- **Not run?** Search still works on what was read before; its answers say how many files are covered and when the indexer last finished. Files you open with `read_file_text` are added on the way.
+- **Then it embeds** (phase 2, Gemini, no NTULearn): every new text gets a vector for meaning search, 50 per request, paced under Gemini's free per-minute limits. On the paid tier (billing on the Google Cloud project, `UNI_COPILOT_GEMINI_TIER=paid` in `.env`; since 30 Oct) there's no daily limit and a full run takes minutes. On the free tier (the default setting) it stops cleanly at Gemini's **daily** limit (~1,000 texts) and says when it resets (midnight US Pacific, 15:00 or 16:00 SGT); carry on later with `--embed-only` (no NTULearn at all). A reached monthly spend cap stops it the same way, with its own message. `--no-embed` only reads files; `--max-tokens N` caps one run.
+- **Not run?** Search still works on what was read before; its answers say how many files are covered, how many texts have meaning vectors, and when the indexer last finished. Files you open with `read_file_text` are added on the way (keyword at once; meaning after the next indexer run).
 - Whether to schedule it (poke often, decide in code) is decided after the test week.
 
 ## A normal day with the PC on all day
