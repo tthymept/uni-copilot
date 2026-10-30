@@ -6,6 +6,7 @@ shared clients are swapped for fakes with monkeypatch.
 
 import asyncio
 import json
+import re
 
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError
@@ -110,3 +111,17 @@ def test_permission_rules_match_tools():
     assert allowed == TOOL_NAMES - {"login", "download_file"}
     mcp_json = json.loads((PROJECT_ROOT / ".mcp.json").read_text(encoding="utf-8"))
     assert mcp_json["mcpServers"]["ntulearn"]["args"] == ["run", "ntulearn-mcp"]
+
+
+# The Telegram session (scripts/start-telegram.ps1) either pre-allows or removes
+# every ntulearn tool, so none can stall it waiting for a click at the PC
+# (Phase 4 decision 8). A new tool must be added to one of the two lists.
+def test_telegram_session_allows_or_denies_every_tool():
+    script = (PROJECT_ROOT / "scripts" / "start-telegram.ps1").read_text(encoding="utf-8")
+    lock = script.split("$Lock = @(", 1)[1].split(")", 1)[0]       # the session's lock options
+    denied = {name.removeprefix("mcp__ntulearn__") for name in re.findall(r'"(mcp__ntulearn__\w+)"', lock)}
+    settings = json.loads((PROJECT_ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    allowed = {rule.removeprefix("mcp__ntulearn__") for rule in settings["permissions"]["allow"]
+               if rule.startswith("mcp__ntulearn__")}
+    assert denied == {"login", "download_file"}
+    assert allowed | denied == TOOL_NAMES and not allowed & denied

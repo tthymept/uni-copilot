@@ -26,9 +26,11 @@ In plain words:
     ENABLE_CLAUDEAI_MCP_SERVERS=false, --no-chrome
                                    no claude.ai connectors (Drive, Gmail,
                                    Calendar, Docs) and no browser control
-    --disallowedTools mcp__ntulearn__login
-                                   no sign-in window from Telegram
-  It keeps pilot, the read-only ntulearn tools and the plugin's reply tools.
+    --disallowedTools mcp__ntulearn__login mcp__ntulearn__download_file
+                                   no sign-in window, and no saving course files
+                                   on the PC, from Telegram (Phase 4, 30 Oct;
+                                   both would wait for a click at the PC)
+  It keeps pilot, the read-only ntulearn tools (incl. search) and the plugin's reply tools.
   The hooks still run (Claude Code runs them, not Claude). Coding and anything
   else happens in your normal Claude Code sessions, which aren't affected.
 
@@ -70,10 +72,11 @@ Remove-Item Env:ANTHROPIC_API_KEY -ErrorAction SilentlyContinue
 
 # The lock (see the top of this file).
 $env:ENABLE_CLAUDEAI_MCP_SERVERS = "false"
-$Lock = @("--tools", "Skill,ToolSearch", "--no-chrome", "--disallowedTools", "mcp__ntulearn__login")
+$Lock = @("--tools", "Skill,ToolSearch", "--no-chrome",
+          "--disallowedTools", "mcp__ntulearn__login", "mcp__ntulearn__download_file")
 
 Set-Location $Root
 Write-Output "Starting Claude Code with the Telegram channel in $Root (token from .env, not shown)."
-Write-Output "Locked to study Q&A: no shell, files, web, connectors or login in this session."
+Write-Output "Locked to study Q&A: no shell, files, web, connectors, login or downloads in this session."
 Write-Output "Keep this window open; messages to the bot only arrive while it runs."
 & claude --channels plugin:telegram@claude-plugins-official --settings (Join-Path $Root ".claude\telegram-session.json") @Lock @args

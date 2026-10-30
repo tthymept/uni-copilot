@@ -48,7 +48,7 @@ Status: 30 Oct 2026 (Phase 3 test week; Phase 4 indexer added, run by hand). All
 
 - **Runs:** only while the window from `scripts\start-telegram.ps1` is open. Restart it about once a day.
 - **Closed?** Messages you send wait at Telegram for up to 24 hours and are answered when you start it again.
-- Locked to study questions: no shell, files, web or sign-in from Telegram.
+- Locked to study questions: no shell, files, web, sign-in or course-file downloads from Telegram (search and reading course files work).
 
 ### 5. The content indexer (Phase 4, by hand, not scheduled)
 

@@ -1019,6 +1019,32 @@ The first sends nothing anywhere: the count and estimate (about 4,808 texts, ~0.
 uv run python -m uni_copilot.ntulearn_mcp.search --real "AVL rotation"
 ```
 
+## Step 18: `.claude/settings.json` (the allow list), checked: nothing to change
+
+**What the allow list is:** Claude Code asks you before it uses a tool ("Allow ntulearn - search?"). `.claude/settings.json` → `permissions.allow` lists the tools it may use **without asking**. It's checked into the repo, so every session in this folder (terminal, Telegram, the headless digest) gets the same list. `.claude/settings.local.json` is your personal, git-ignored file; here it only switches the two servers on (`enabledMcpjsonServers`), no extra permissions.
+
+**Checked (30 Oct):** the allow list already has every read-only Phase 4 tool: `list_course_content`, `read_page`, `read_file_text`, `get_assessment` (added in step 10) and `search` (added in step 13). **Not on it, on purpose:** `login` (opens a browser window) and **`download_file`** (saves a file on your PC: Claude Code asks every time). `settings.local.json` doesn't allow anything else. `tests/test_server.py` (`test_permission_rules_match_tools`) fails if the list ever drifts: it must be exactly "every ntulearn tool except `login` and `download_file`". So this step needed no change.
+
+**Why it matters for Telegram:** a tool that isn't allowed makes the Telegram session wait for a click **at the PC** (the plugin can't relay permission prompts). That's fine for `login` (denied there) and why step 19 denies `download_file` in that session too: removed from its tool list, instead of a prompt nobody sees.
+
+## Step 19: `scripts/start-telegram.ps1` (no downloads from Telegram)
+
+The one agreed exception to "don't touch Phase 3 pieces" (decision 8).
+
+- **`$Lock`** now ends with `"--disallowedTools", "mcp__ntulearn__login", "mcp__ntulearn__download_file"`. `--disallowedTools` takes several names (`claude --help`: `<tools...>`, comma or space separated). A denied tool is **removed** from that session's tool list, so Claude there can't even try it, instead of waiting for a click at the PC that nobody sees. The comment block and the start-up line ("no shell, files, web, connectors, login or downloads") say so.
+- **New guard test** `test_telegram_session_allows_or_denies_every_tool` (`tests/test_server.py`, decision 8): reads the `$Lock` line of the script and `.claude/settings.json`; every ntulearn tool must be either pre-allowed or denied in Telegram (never both), and the denied ones are exactly `login` and `download_file`. A future tool that's in neither list fails the test.
+- **Docs:** `docs/how-it-runs.md` (Telegram is locked to study questions: no downloads either), the plan's wiring note on the Telegram session.
+
+Checks (30 Oct): `uv run pytest` → **187 passed**, 4 skipped (the new guard test included).
+
+Check (needs a restart of the Telegram window, once): close the running Telegram session (`/exit` or Ctrl+C), start it again:
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\start-telegram.ps1
+```
+
+The start-up line should say "… login or downloads in this session." Then from your phone: "which IE2108 slides explain AVL trees?" (search, then read_file_text; no prompt at the PC) and "download the IE2108 AVL slides" (Claude should say downloading has to be done at the PC; nothing waits at the PC).
+
 ## Open items
 
 Everything not yet verified in Phase 4. Updated as steps finish.
