@@ -397,6 +397,15 @@ class ContentCache:
         return CachedFile(f["course_code"], f["file_name"], f["file_type"], pages, f["empty_pages"],
                           time_from_db(f["modified_at"]), time_from_db(f["extracted_at"]))
 
+    # The file_refs of an item whose cached text was made from `version` (the
+    # item's `modified` now; None for embedded files). Lets the indexer skip a
+    # file item that's already read WITHOUT asking NTULearn for its attachments.
+    def current_file_refs(self, site_id: str, content_id: str, version: datetime | None) -> list[str]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT file_ref, modified_at FROM files WHERE site_id = ? AND content_id = ?",
+                                (site_id, content_id)).fetchall()
+        return [r["file_ref"] for r in rows if time_from_db(r["modified_at"]) == version]
+
     # Drops the cached text of an item's files that it no longer has (e.g. a
     # page whose embedded slides were replaced: the new upload gets a new
     # xid, and the old text mustn't stay findable). `keep` = the file_refs

@@ -745,6 +745,62 @@ git add src/uni_copilot/ntulearn_mcp/search.py src/uni_copilot/ntulearn_mcp/cach
 git commit -m "feat(ntulearn): add keyword search over course content and posts"
 ```
 
+## Step 12: indexer.py (read every course's files, by hand)
+
+**Vector database?** (your question): none so far. Steps 14–17 store embedding vectors in the same SQLite file (a `chunks` table, vectors as bytes) and compare them with `numpy` (brute force: every vector, no index), which takes milliseconds for ~4,000–10,000 chunks. A dedicated vector database pays off at hundreds of thousands of vectors. Option noted: `sqlite-vec` (a SQLite extension with vector tables and nearest-neighbour SQL, still one file); to revisit once hybrid search works.
+
+**New file `src/uni_copilot/ntulearn_mcp/indexer.py`**, run by hand:
+
+```
+uv run python -m uni_copilot.ntulearn_mcp.indexer               every course this term
+uv run python -m uni_copilot.ntulearn_mcp.indexer --course IE2108
+uv run python -m uni_copilot.ntulearn_mcp.indexer --dry-run     list what it would read, and how long
+uv run python -m uni_copilot.ntulearn_mcp.indexer --refresh     read every file again
+```
+
+- **`run()`**, per course: the tree **fresh** (`subject_tree(refresh=True)`, which updates titles and page text, removes what NTULearn removed and notices replaced files), then **`readable_files()`** (file items and embedded files with a link that are PDF, PPTX, notebooks or text; videos, zips, images left out), then **`already_read()`** for each (a **local** check, no request: file items by their `modified`, embedded files by their xid; `cache.current_file_refs`, new), then reads the rest one by one (**`_read_one()`** → `ContentsClient.file_pages`: download into memory, extract, save, drop the bytes). Finally the posts are copied into search, and a full run records `indexer_finished_at` (search's coverage shows it).
+- **Polite:** its own `NtuLearnHttp(interval=INDEXER_INTERVAL_S)`, one request every 2 s (`interval` is a new optional parameter; the default, used by the sync and the tools, is unchanged).
+- **One at a time:** `.data/index.lock` (`filelock.file_lock`, like the sync's lock); a second run stops at once. Sign-ins take turns as always.
+- **Never loses work:** each file is saved the moment it's read. One file failing (removed → 404, too big, unreadable, not supported) is reported and skipped; a whole course failing too. Ctrl+C or a sign-in problem stops the run cleanly ("Stopped early … run it again to carry on"; exit code 1).
+- **`--dry-run`:** fetches the trees (a few requests) and lists what would be read with an estimate (~9 s per file: ~4 requests at 2 s + reading).
+- **Output:** per course a line (items, readable files, to read), per file `[12/131] IE2108 Lec_IE2108_W8.pdf: pdf, 21 pages, 9.3 s`, then a summary and what search covers now. File names, page counts and timings; never file contents or links.
+
+**New ideas:**
+
+- **Resumable job:** work saved piece by piece, so a stop loses nothing and the next run skips what's done.
+- **A local check before a remote one:** "is it already done?" answered from the cache, so a rerun costs only the trees.
+
+Checks (30 Oct, offline, the fake NTULearn of step 9): a dry run lists 2 files, downloads nothing; the first run reads both and records `indexer_finished_at`; a second run reads nothing and makes **no request** beyond the tree; a replaced embedded file that answers 404 is skipped with the plain message while the run goes on; Ctrl+C stops cleanly with the summary. `uv run pytest` → 186 passed, 4 skipped.
+
+Check (PowerShell, live, GET only). First the dry run (a few requests, under a minute), then the real run (~30–40 minutes the first time; keep the laptop awake and plugged in; you can keep using it; Ctrl+C is safe):
+
+```
+uv run python -m uni_copilot.ntulearn_mcp.indexer --dry-run
+uv run python -m uni_copilot.ntulearn_mcp.indexer
+uv run python -m uni_copilot.ntulearn_mcp.search --real "AVL rotation"
+```
+
+**Dry run (30 Oct):** all 8 courses' trees fetched; **354 readable files**, 3 already read, estimate **about 53 minutes**. Per course: CC0006 49, CL0105 5, DA3000 17, IE0005 111, IE2106 29, IE2108 61 (60 to read), IE2110 28 (26), ML0004 57. (Search's earlier "138 known" counted only the 3 courses opened by then.) Two things the list shows, to decide after the real run:
+
+- **The same file attached many times:** IE0005 lists `pokemonData.csv` ~10 times, `train.csv` and `data_description.txt` 5 times, `M2 BasicStatistics.ipynb` 3 times (each copy is its own item on NTULearn). The indexer downloads each copy (~25 extra files, ~4 minutes) and search could show the same text several times. Proposed: search collapses hits with the same file name and snippet.
+- **Data files indexed as text:** `train.csv`, `pokemonData.csv` are raw data; their "text" is rows of numbers that bulk up the index and clutter search. Proposed: the indexer skips `.csv` (`read_file_text` can still read one on request; `data_description.txt` stays indexed).
+
+**Real run (30 Oct):** the first run read 163 files (3,030 pages) before you stopped it with Ctrl+C to close the lid ("Stopped early … run it again to carry on", as designed); 2 IE0005 notebooks were skipped with the plain 404 message (`M1 DataAcquisition_r1.ipynb`, `Exercise1_Solution_r1.ipynb`: removed from NTULearn's file store, still linked on their page). The second run carried on from there. **Search now covers 8 of 8 courses, 353 of 358 known files, 221 pages, 58 posts** (one file and one post were new between the runs). The 5 unread files: the 2 notebooks above and 3 the second run skipped (its skipped lines weren't pasted; the next run lists them again).
+
+**"AVL rotation" (30 Oct):** 10 hits, with the note "No result had all the words". Checked in the cache (counts only): **no row anywhere has both words.** "avl" is in 74 rows, all IE2108 (72 pages from 9 files, 1 announcement, 1 title); "rotation" is in 12 rows, none of them IE2108 (CC0006, IE0005, IE2110). IE2108's AVL slides never write "rotation" in their text (no "rotate", "restructure" or "trinode" either; "balance" 37 rows, "height" 23): the rotations are probably drawn, not written. So the keyword search behaved correctly. Two things it shows:
+
+- **The top hit was the wrong course:** IE2110 page 43 (only "rotation") ranked above IE2108's AVL pages, because BM25 gives a rare word (12 rows) more weight than a common one (74). Proposed: when no result has all the words, rank by **how many of the words** a row has first, then BM25, and say which words each hit matched.
+- **Meaning search would help here:** "AVL rotation" means rebalancing an AVL tree; an embedding of the IE2108 pages about balance and height is close to that meaning without the word. Steps 14–17.
+
+**Copies (30 Oct, counted in the cache):** of the 353 files read, only **306 have different text**: 17 groups of identical files, **47 extra copies, 1,166 extra pages** (one 163-page PDF exists 6 times, one 15-page file 14 times). By type: 18 csv, 14 pdf, 10 ipynb, 5 txt. That's about a quarter of all pages. It matters most for step 17: embedding each copy again would spend Gemini's daily limit (1,000 requests) on text already embedded. Proposed, extending the proposal above: **one set of chunks per distinct text** (keyed by a hash of the text), and search collapses hits with the same text into one hit that lists where else it appears.
+
+Commit:
+
+```
+git add src/uni_copilot/ntulearn_mcp/indexer.py src/uni_copilot/ntulearn_mcp/cache.py src/uni_copilot/ntulearn_mcp/client/http.py docs
+git commit -m "feat(ntulearn): add indexer that reads every course's files into search"
+```
+
 ## Open items
 
 Everything not yet verified in Phase 4. Updated as steps finish.

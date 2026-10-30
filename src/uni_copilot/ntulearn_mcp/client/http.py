@@ -110,13 +110,16 @@ class NtuLearnHttp:
     # `signer` is the sign-in function; tests pass a fake one so no browser opens.
     # `file_session_factory` (Phase 4) makes the cookie-less session get_file
     # uses for Blackboard's file server; tests pass a fake one.
+    # `interval` (Phase 4): seconds between requests. The default is the
+    # tools' and the sync's ~1 per second; the indexer passes a slower one.
     def __init__(self, signer: Callable[..., LoginResult] = sign_in,
-                 file_session_factory: Callable[[], requests.Session] = requests.Session):
+                 file_session_factory: Callable[[], requests.Session] = requests.Session,
+                 interval: float = REQUEST_INTERVAL_S):
         self._signer = signer
         self._file_session_factory = file_session_factory
         self._session = requests.Session()
         self._session.headers["Accept"] = "application/json"
-        self._pacer = _Pacer(REQUEST_INTERVAL_S)
+        self._pacer = _Pacer(interval)
         self._slots = threading.BoundedSemaphore(MAX_CONCURRENT)
         self._login_lock = threading.Lock()
         # Goes up by one every time we get new cookies. Lets a thread tell
