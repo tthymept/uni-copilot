@@ -1119,6 +1119,29 @@ Also: a test id may not hold 50 MB (Windows limits environment variables to 32,7
 
 Check: `uv run pytest` → 272 passed, 4 skipped.
 
+## Step 24: final check (30 Oct)
+
+**Checked by me (30 Oct, about 16:30 SGT):**
+
+- **Done-when 3, meaning search helps (10 questions with no shared words, keyword-only vs hybrid, top 3, 10 tiny Gemini requests):** hybrid was better or equal on all 10. Clear wins: "a queue where the most urgent item comes out first" and "avoiding a model that memorises the training data" (keyword-only put the *NTU Academic Integrity Handbook* in the top 3; hybrid gave the stack/queue lecture and the IE0005 week 3 summary lecture, by both searches); "keeping a binary search tree from getting lopsided" (hybrid adds `IE2108-8-AVL-tree.pdf` p.6 by meaning, 0.74); "how do I find the shortest route in a graph" (adds the week 9 lecture p.5 and the T10 solutions p.5 by meaning); "filling in missing values in a dataframe" and "plotting the relationship between two numeric variables" (each adds an IE0005 notebook by meaning); "measuring how well a classifier predicts" the same pages, now confirmed by both. Your judgement of relevance is still welcome (the list is in the chat).
+- **Done-when 4, Gemini unavailable:** live with `UNI_COPILOT_EMBEDDINGS=off`: `mode: keyword_only; reason: Meaning search is off (UNI_COPILOT_EMBEDDINGS=off). These are keyword results.`; the limits themselves were met for real on 30 Oct (the daily limit stopped the indexer cleanly; 402 gave its reason) and every case is in the tests.
+- **Done-when 7, Phase 3 kept running:** `remind.log` and `digest.log` normal (every run exit 0; the digest "Already done today" after its morning run). `uv run pytest` → 272 passed, 4 skipped (all old tests included). **`sync.log`: two failed runs**, see below.
+- **Things to check:** text quality (step 7), size and time (4,808 texts, ~0.88 million tokens; full index ~1 hour reading, 2 minutes embedding on the paid tier), Gemini's batch counting and limit errors (step 17), whether embeddings help (above): all answered.
+
+**Finding for the Phase 3 test week (not changed: Phase 3's area):** the scheduled sync failed twice, **Thu 29 Oct 16:27** and **Fri 30 Oct 16:23**, each time with `AuthError: Browser failed (hidden, Error)` for all three sources ("their old data was kept"), and the next run succeeded. Both times sync, remind and digest all ran in the same minute: the **catch-up right after the laptop woke** (remind.log shows no runs between 15:10 and 16:23 today). Likely cause (not verified): the hidden sign-in browser starts before Wi-Fi is back after waking. Harmless so far (old data kept, next run fine, the answers say "as of"), but worth a fix in Phase 3's wrap-up: e.g. on a failed silent sign-in right after waking, wait ~30 s and try once more. Your call.
+
+**Still yours (needs a fresh session and your phone):**
+
+1. **Done-when 1:** in a **new** Claude Code session: "What does this week's IE2108 lecture cover?" → `list_course_content` to the week's folder, `read_file_text`, an answer with file name, slide numbers and a link, "cached at".
+2. **Done-when 2:** "Where did IE2108 say what the quiz covers?" → `search`, the answer names the source (announcement, page or slide) and how old it is.
+3. **Done-when 5:** "When does <a quiz> open?" → a date only for the rare date rules, else "open to you" / "held back until another item is done".
+4. **Done-when 6:** "Download the IE2108 week 11 slides" in the terminal → Claude Code asks first; the PDF lands in `Downloads\uni-copilot\IE2108\`.
+5. **Telegram** (restart its window first): the start line ends "… login or downloads in this session"; "which IE2108 slides explain AVL trees?" (search, then the slide, no prompt at the PC); "download the slides" (it says that's done at the PC); "send me the IE2108 week 11 lecture slides" (it names the file and asks; after "yes" the PDF arrives).
+
+When those look right, Phase 4 is done.
+
+**Your checks (30 Oct, evening): passed.** Done-when 1 ("What does this week's IE2108 lecture cover?": the Lectures folder, `Lec_IE2108_W11.pdf` read and cited by slide, "cached at"), done-when 2 ("Where did IE2108 say what the quiz covers?": `search` found the announcement about online quiz #6 and IRA #6, read in full from the store with its "as of"), done-when 6 ("download ie2110 latest mock ira": search found the mock IRA page, Claude Code asked first, `Mock_Test_IE2110_IRA#8-Week#12.pdf` saved to `Downloads\uni-copilot\IE2110\`), and the Telegram checks: "everything's good". **Phase 4 is done.** `README.md` (new, for visitors) and the plan say so.
+
 ## Open items
 
 Everything not yet verified in Phase 4. Updated as steps finish.
