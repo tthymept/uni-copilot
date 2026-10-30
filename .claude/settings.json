@@ -11,6 +11,7 @@
       "mcp__ntulearn__read_file_text",
       "mcp__ntulearn__get_assessment",
       "mcp__ntulearn__search",
+      "mcp__ntulearn__send_course_file",
       "mcp__pilot__list_events",
       "mcp__pilot__whats_new",
       "mcp__pilot__get_event",

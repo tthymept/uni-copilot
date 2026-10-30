@@ -21,7 +21,9 @@ TOOL_NAMES = {"login_status", "login", "list_courses", "upcoming_deadlines",
               # Phase 4 (step 10): the read-only content tools
               "list_course_content", "read_page", "read_file_text", "get_assessment",
               # Phase 4 (step 13): local search, and saving one file (asks every time)
-              "search", "download_file"}
+              "search", "download_file",
+              # Phase 4 (step 22): one PDF/PPTX to your own Telegram chat, after your "yes"
+              "send_course_file"}
 
 
 # Runs an async MCP call from a normal test.

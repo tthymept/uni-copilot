@@ -53,6 +53,7 @@ from uni_copilot.ntulearn_mcp.config import (
     READ_MAX_BYTES,
     READ_MAX_CHARS,
     READ_MAX_PAGES,
+    SEND_MAX_BYTES,
     load_settings,
 )
 from uni_copilot.ntulearn_mcp.models import (
@@ -75,7 +76,7 @@ from uni_copilot.ntulearn_mcp.parsers.content import (
     release_from_public,
     to_content_item,
 )
-from uni_copilot.ntulearn_mcp.parsers.files import choose_pages, extract_text
+from uni_copilot.ntulearn_mcp.parsers.files import choose_pages, detect_type, extract_text
 
 log = logging.getLogger(__name__)
 
@@ -83,6 +84,7 @@ PUBLIC = "/learn/api/public/v1/courses"
 INTERNAL = "/learn/api/v1/courses"
 TREE_PAGE_LIMIT = 200
 # download_file refuses these: videos are a plan non-goal (and big).
+SENDABLE_EXTENSIONS = {".pdf", ".pptx"}      # send_course_file (decision 12)
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".wmv", ".m4v", ".webm"}
 # Windows refuses these as file names, whatever the extension.
 WINDOWS_RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
@@ -358,6 +360,28 @@ class ContentsClient:
         mark_of_the_web(final)
         return DownloadResult(course_code=found.course_code, file_name=final.name, saved_to=str(final),
                               size_bytes=final.stat().st_size, content_type=mime)
+
+    # One course file in memory, for send_course_file (Telegram): PDF or
+    # PPTX only (by name, then checked by its first bytes), at most
+    # SEND_MAX_BYTES (Telegram's 50 MB for bots). Never written to disk.
+    # Returns (course code, file name, "pdf" | "pptx", the bytes).
+    def file_bytes_for_sending(self, course: str, content_id: str,
+                               file_ref: str | None = None) -> tuple[str, str, str, bytes]:
+        found = self._find(course, content_id)
+        start, name, mime, _ = self._file_start(found.site_id, found.item, file_ref, refresh=False)
+        if PurePosixPath(name.lower()).suffix not in SENDABLE_EXTENSIONS:
+            raise ValueError(f"Only PDF and PPTX files are sent to Telegram; '{name}' isn't one. "
+                             "It can be downloaded at the PC instead.")
+        sink = io.BytesIO()
+        self._fetch_file(start(), SEND_MAX_BYTES, sink)
+        data = sink.getvalue()
+        try:
+            kind = detect_type(data, name, mime)
+        except ValueError:
+            kind = None
+        if kind not in ("pdf", "pptx"):
+            raise ValueError(f"'{name}' doesn't look like a real PDF or PPTX file, so it isn't sent.")
+        return found.course_code, name, kind, data
 
     # ---------- 6. Assessments ----------
 

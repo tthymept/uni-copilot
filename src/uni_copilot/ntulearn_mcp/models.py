@@ -469,6 +469,16 @@ class DownloadResult(_Result):
     content_type: str | None = None
 
 
+# Answer of send_course_file: which file went to the user's Telegram chat.
+# The file was fetched into memory and never saved on the PC.
+class SentFile(_Result):
+    course_code: str
+    file_name: str = Field(description=UNTRUSTED + " The file's name as NTULearn has it.")
+    file_type: Literal["pdf", "pptx"]
+    size_bytes: int
+    sent_to: str = Field(default="your Telegram chat with the bot", description="Always the user's own chat.")
+
+
 # ---------- Session ----------
 
 # Answer of the login_status / login tools. Cookie names and expiry only, never values.

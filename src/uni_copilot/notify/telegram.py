@@ -6,7 +6,8 @@ In plain words:
     through the Bot API: HTTPS requests to https://api.telegram.org/bot<token>/<method>.
     The token is the bot's password, and it is part of every URL, so this file
     never logs a URL and scrubs the token out of every error message.
-  - We only SEND (`sendMessage`). Reading messages sent to the bot is the
+  - We only SEND (`sendMessage`, and from Phase 4 `sendDocument` for a course
+    file you asked for). Reading messages sent to the bot is the
     Telegram plugin's job (Phase 3 step 11): only one program may poll a bot.
     The one exception is find_chat_ids(), a one-off setup helper.
   - This is Telegram, not NTULearn: NTULearn is still reached only through
@@ -51,6 +52,13 @@ MAX_MESSAGE_CHARS = 4096
 REQUEST_TIMEOUT_S = 30
 MAX_RETRIES = 3            # for 429, 5xx and network errors, with growing waits
 PART_INTERVAL_S = 1.0      # Telegram allows about 1 message per second per chat
+# Phase 4, send_document: Telegram's Bot API takes files up to 50 MB from a
+# bot; a caption up to 1024 characters. Uploading can take a while, so a
+# longer read timeout (connect 10 s, then up to 5 minutes).
+MAX_DOCUMENT_BYTES = 50 * 1_000_000
+MAX_CAPTION_CHARS = 1024
+DOCUMENT_TIMEOUT_S = (10, 300)
+CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
 TAG = re.compile(r"<[^>]*>")
 # An opening (<b>, <a href=...>) or closing (</b>) tag; group 1 is "/" for closing.
@@ -154,6 +162,18 @@ def strip_html(text: str) -> str:
 # Used on every error description before it leaves this file.
 def scrub(text: str, token: str) -> str:
     return text.replace(token, "<token>") if token else text
+
+
+# A file name fit to show in Telegram: control characters (newlines, tabs)
+# become spaces (runs of spaces become one), at most 120 characters with the
+# extension kept, "file" if empty.
+# The name comes from NTULearn (UNTRUSTED); it's only shown, never used as a path.
+def document_name(name: str) -> str:
+    name = " ".join(CONTROL.sub(" ", name).split()) or "file"
+    if len(name) > 120:
+        stem, dot, ext = name.rpartition(".")
+        name = (stem[:110] + "." + ext[:9]) if dot and len(ext) <= 9 else name[:120]
+    return name
 
 
 # Length the way Telegram counts it: UTF-16 units (most characters 1, emoji 2).
@@ -287,6 +307,27 @@ class TelegramBot:
             raise TelegramNotConfigured("TELEGRAM_CHAT_ID is missing: run `uv run uni-copilot telegram-chat-id`.")
         self._call("deleteMessage", {"chat_id": self._settings.chat_id, "message_id": message_id})
 
+    # Sends one file to your chat as a document (`sendDocument`) and returns
+    # its message id. `data` is the file in memory (never written to disk
+    # here); `caption` is plain text under it (cut to 1024 characters).
+    # Refuses empty files and files over 50 MB with a ValueError. Only ever
+    # to the chat id from .env, like every other message.
+    def send_document(self, file_name: str, data: bytes, caption: str = "") -> int:
+        if not self._settings.chat_id:
+            raise TelegramNotConfigured("TELEGRAM_CHAT_ID is missing: run `uv run uni-copilot telegram-chat-id`.")
+        if not data:
+            raise ValueError("nothing to send: the file is empty")
+        if len(data) > MAX_DOCUMENT_BYTES:
+            raise ValueError(f"the file is {len(data) / 1_000_000:.1f} MB; Telegram takes at most "
+                             f"{MAX_DOCUMENT_BYTES // 1_000_000} MB from a bot")
+        payload: dict[str, Any] = {"chat_id": self._settings.chat_id}
+        if caption.strip():
+            payload["caption"] = caption.strip()[:MAX_CAPTION_CHARS]
+        sent = self._call("sendDocument", payload, files={"document": (document_name(file_name), data)},
+                          timeout=DOCUMENT_TIMEOUT_S)
+        log.info("sendDocument: sent %d bytes", len(data))
+        return int(sent["message_id"])
+
     # Asks Telegram who this bot is (`getMe`). Confirms the token works and
     # returns the bot's public username, e.g. "unicopilot_thyme_bot".
     def get_me(self) -> str:
@@ -313,17 +354,22 @@ class TelegramBot:
                 chats[str(chat["id"])] = chat.get("first_name", "")
         return list(chats.items())
 
-    # Sends one Bot API call (a POST with a JSON body) and returns its "result".
+    # Sends one Bot API call (a POST with a JSON body, or with `files` a
+    # multipart upload with the payload as form fields) and returns its "result".
     # Retries 429 (waiting as long as Telegram says), 5xx and network errors.
     # Never logs the URL (it contains the token); errors carry Telegram's
     # description with the token scrubbed out, and `from None` stops Python
     # from attaching the original exception, whose text includes the URL.
-    def _call(self, method: str, payload: dict[str, Any]) -> Any:
+    def _call(self, method: str, payload: dict[str, Any], files: dict[str, Any] | None = None,
+              timeout: Any = REQUEST_TIMEOUT_S) -> Any:
         url = f"{API_BASE}/bot{self._settings.token}/{method}"
         retries = 0
         while True:
             try:
-                r = self._session.post(url, json=payload, timeout=REQUEST_TIMEOUT_S)
+                if files:
+                    r = self._session.post(url, data=payload, files=files, timeout=timeout)
+                else:
+                    r = self._session.post(url, json=payload, timeout=timeout)
             except requests.RequestException as e:
                 if retries < MAX_RETRIES:
                     retries += 1
@@ -369,14 +415,20 @@ def _main() -> None:
     parser = argparse.ArgumentParser(description="Self-test of the Telegram sender.")
     parser.add_argument("--check", action="store_true", help="live: check the token with getMe")
     parser.add_argument("--send-test", action="store_true", help="live: send one test message to your chat")
+    parser.add_argument("--send-test-file", action="store_true",
+                        help="live: send one tiny made-up text file to your chat")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="  [%(name)s] %(message)s")
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
-    if args.check or args.send_test:
-        settings = load_telegram_settings(need_chat_id=args.send_test)
+    if args.check or args.send_test or args.send_test_file:
+        settings = load_telegram_settings(need_chat_id=args.send_test or args.send_test_file)
         bot = TelegramBot(settings)
         print("Bot username:", bot.get_me())
+        if args.send_test_file:
+            bot.send_document("uni-copilot-test.txt", "A made-up test file from uni-copilot.".encode(),
+                              caption="uni-copilot test file (made up)")
+            print("Sent one tiny test file. Check your phone.")
         if args.send_test:
             title = escape("Made-up Lab <draft> & notes")
             sent = bot.send_message(f"<b>uni-copilot test</b>\nA title with odd characters: {title}", html=True)
@@ -412,6 +464,41 @@ def _main() -> None:
     fake = "123456:FAKE-token"
     print(f"   {scrub(f'error at https://api.telegram.org/bot{fake}/sendMessage', fake)}")
     print(f"   settings repr: {TelegramSettings(token=fake, chat_id='42')}")
+
+    print("")
+    print("5) Sending a document (a fake Telegram, nothing sent):")
+
+    class FakeSession:
+        def __init__(self, answer):
+            self.answer, self.sent = answer, []
+
+        def post(self, url, json=None, data=None, files=None, timeout=None):
+            self.sent.append({"url": url, "json": json, "data": data, "files": files, "timeout": timeout})
+            r = requests.Response()
+            r.status_code, r._content = self.answer
+            return r
+
+    ok = FakeSession((200, b'{"ok": true, "result": {"message_id": 77}}'))
+    bot = TelegramBot(TelegramSettings(token=fake, chat_id="42"), ok, sleep=lambda s: None)
+    message_id = bot.send_document("Lec 9" + chr(10) + "AVL.pdf", b"%PDF-1.4 tiny", caption="IE2108, Lec 9")
+    call = ok.sent[0]
+    name, data = call["files"]["document"]
+    print(f"   message id {message_id}; form fields {sorted(call['data'])}; name sent {name!r}; "
+          f"{len(data)} bytes; timeout {call['timeout']}")
+    long_name = document_name("x" * 200 + ".pdf")
+    print(f"   a 204-character name -> {len(long_name)} characters, ends {long_name[-6:]!r}")
+    for bad in (b"", b"x" * (MAX_DOCUMENT_BYTES + 1)):
+        try:
+            bot.send_document("a.pdf", bad)
+        except ValueError as e:
+            print(f"   {len(bad):,} bytes -> {e}")
+    body = '{"ok": false, "description": "Bad Request: bot' + fake + ' file is too big"}'
+    rejected = FakeSession((400, body.encode()))
+    try:
+        TelegramBot(TelegramSettings(token=fake, chat_id="42"), rejected, sleep=lambda s: None).send_document(
+            "a.pdf", b"%PDF-")
+    except TelegramError as e:
+        print(f"   Telegram error, token scrubbed: {e}")
 
 
 if __name__ == "__main__":
