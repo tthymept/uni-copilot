@@ -23,7 +23,7 @@ Built in phases. Each phase ends with something usable, and has its own design n
 | 0 | Spike: Playwright sign-in, cookies reused by plain `requests` | Done |
 | 1 | `ntulearn-mcp`: courses, deadlines with submission status, announcements, course messages | Done |
 | 2 | Local event store, scheduled `sync` with change detection, `pilot-mcp`, weekly checklist skill | Done |
-| 3 | Telegram: Q&A from a phone, morning digest, deadline reminders, "mark as done" | Built, in a one-week real-use test |
+| 3 | Telegram: Q&A from a phone, morning digest, deadline reminders, "mark as done" | Done |
 | 4 | Course content and search: folders, pages, slide/PDF/notebook text, quiz details, hybrid keyword + meaning search, downloads, sending files to Telegram | Done |
 | 5 | Lecture recordings and transcripts, lecture-notes skill | Planned |
 | 6 | Google Calendar sync (confirmed writes), workload planner | Planned |

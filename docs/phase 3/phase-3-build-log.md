@@ -518,7 +518,7 @@ git add tests src/uni_copilot/notify/telegram.py docs
 git commit -m "test: add offline tests for telegram, reminders and pilot tools"
 ```
 
-## Step 13: the test week (27 Oct – 3 Nov), and fixes it found
+## Step 13: the test week (27 Oct – 7 Nov), and fixes it found
 
 You use it for a week without opening NTULearn; anything odd gets reported and fixed. Fixes so far:
 
@@ -544,28 +544,51 @@ The fix follows a new rule, **"poke often, decide in code"** (also in `CLAUDE.md
 
 **29 Oct: the first morning with the new digest, and a how-it-runs doc.** The laptop slept from ~14:05 (28 Oct) to 10:54. At 10:53 Windows did start the catch-up runs (the new digest task too), but during a standby flicker, and sync and digest were cut off again (`0x41306`, no log lines); `remind`'s catch-up at 10:54 worked. Regular runs then: sync 11:00 (0 changes); a digest run at 11:00 saw the store was from 28 Oct 13:22, **waited for the 11:00 sync and reused it** ("Another sync just finished"), then failed with `Claude Code couldn't start (FileNotFoundError)`: Claude Code was updating itself at that moment (2.1.310 → 2.1.312, `claude.exe` rewritten at 11:01:48). That counted as try 1 of 3. A late Windows catch-up at 10:59:58 had taken the place of the 11:05 poke (remind's 11:10 too), so the retry came at 11:29: "Nothing new since Wed 28 Oct 10:52 SGT; no digest sent.", exit 0 (correct: the 11:00 sync found 0 changes), and the day was marked done. New: **`docs/how-it-runs.md`**, which says what runs when, what's down when, what happens after the PC was off or asleep, how missed reminders are handled, and when a digest does or doesn't come (linked from `CLAUDE.md` and the plan). Proposed, not built: an extra poke 1 minute after you unlock / sign in.
 
+**7 Nov: the wrap-up.** The test week ran longer than planned (27 Oct – 7 Nov). No code changed in the wrap-up; `uv run pytest` → 272 passed, 4 skipped. What the logs, the store and a live read showed:
+
+- **Store vs live NTULearn (7 Nov ~15:55, GET only):** deadlines in the next 30 days 29 of 29, same due times and statuses; announcements of the last 5 days 12 of 12; messages of the last 7 days 6 of 6. Both sides use the same parsers, so this can't catch a parser mistake; only a look at NTULearn itself can.
+- **Reminders:** 8 sent, in 6 messages, each matching a line in `remind.log`; none sent twice. Every open deadline that came within 24 h got its reminders, with these notes:
+  - IE2108 Online Quiz #6 (the real-deadline check): the 24 h reminder came at Mon 2 Nov 09:50, only about 3 h before, because the laptop slept through Sunday (as designed); the 2 h one at 11:20.
+  - IE2106 Quiz 2: its column appeared only at 12:20 on quiz day, so the 2 h reminder went out at 12:40, during the quiz. Nothing can fix this from our side; the posts about the quiz came days earlier.
+  - Two post-course alternative assignments (ML0004, CC0006) got both reminders. They were open on NTULearn, so that's the rule working, even if the survey was done elsewhere (`done` would have stopped them). `mark_done` wasn't used during the week.
+  - No reminder for work already handed in, except possibly that survey case.
+- **Digests:** one a day on every day the laptop woke, Mon 2 – Sat 7 Nov all sent, none failed since 29 Oct. They report 20 new posts; the change diary has 20 for the same days (counts only). Their text isn't saved, so whether each one read correctly is your judgement.
+- **Sign-in:** the session never expired during the week (no "not signed in" failure); the sync alerts (4 sent since 30 Oct) all came from the failures below or from long sleeps.
+
+**The failed syncs: my earlier explanation was only half right.** 16 of 60 syncs since 28 Oct failed with `Browser failed (hidden, Error / TimeoutError)`. Against Windows' power log (`Kernel-Power` 506/507):
+
+- **All 16 started in the same minute the laptop left Modern Standby,** when Windows starts a missed task straight away. Windows logs the reason: 12 of the 16 were the lid or the power button (you opening the laptop), 3 a battery-drain wake, 1 a display wake. 26 runs started in such a minute: 16 failed, 10 worked. The other 34 runs: 0 failed.
+- **A longer sleep is fine:** when Windows logs a full wake (usually your first open of the day), its catch-up came 5–8 minutes later and worked 11 of 11 times. So the "on unlock" trigger I suggested for sync on 2 Nov would run at the bad moment; retracted.
+- **The sign-in lock from 28 Oct did not stop them** (it does make programs take turns); the error text's "Is another program using .auth/profile?" is misleading here.
+- **Likely cause (not verified):** the network isn't back yet in that minute. On Mon 2 Nov 17:56 a sync failed and `remind` got a Telegram `ConnectionError` in the same minute. The log keeps only the error type, by design, because Playwright messages can contain URLs.
+- **Cost so far:** old data kept, and no reminder or digest lost, but you can open the laptop and have data up to about 2 hours old until the next sync. **Not fixed yet. Your decision (7 Nov): build the retry with the next step:** on a failed hidden sign-in, wait about a minute and try once more. Most failures came just after you opened the laptop, so it should still be awake for the retry (not tested).
+
+Also seen: **the sync's times drift.** After a catch-up, the 2-hour rhythm continued from the catch-up (Fri 6 Nov: 09:54, 11:54, 13:54…), even though `NextRunTime` still showed the odd hours, and it can run past 23:00 (Sat 7 Nov 01:54). Reason not known; harmless.
+
+**Phase 3 is done**, with the failed syncs as a known limit. Your own comparison with NTULearn and the text on your phone are the two things I couldn't see.
+
 ## Open items
 
-Everything not yet verified in Phase 3. Updated as steps finish.
+Everything not verified in Phase 3, updated at the wrap-up (7 Nov). Still open: the failed syncs, the unknown causes below, and your own check of the week.
 
-- **The new digest poke after a night asleep:** the first morning after re-registering; `.data\digest.log` should show "Not yet" lines before 07:30, then one real run.
-- **Why the 10:44 catch-up runs were "terminated":** the line-buffered logs will show what they printed next time.
+- **Verified (7 Nov):** the digest poke after a night asleep: "Not yet" lines before 07:30 and one real run a day (Mon 2 – Sat 7 Nov).
+- **Why the 10:44 catch-up runs were "terminated":** not known. No run has been cut off without its exit line since logs became line-buffered (28 Oct); a run stopped before writing anything wouldn't show.
 
 - **`•` instead of `☐` on Telegram:** rule added after the first answer; check the next checklist.
 - **Why the second Telegram session didn't start the plugin** (Bun on PATH by then): not known. If a fresh start ever stays silent: `/mcp` in the session, and the startup notice about channels.
 
-- **First scheduled digest:** Wed 28 Oct 07:30. Check `.data\digest.log` (sent, or "Nothing new") and the phone.
+- **Verified (7 Nov):** scheduled digests in `.data\digest.log`. Your phone is the check for how they read.
 - **Hidden window:** `-WindowStyle Hidden` can flash a PowerShell window for a moment. Fully invisible is possible (e.g. a tiny launcher) if it bothers you.
 
 - **Verified (kept for the record):** a real digest send by hand (27 Oct 15:26 SGT, you said "send now"): the skill ran, `send_telegram` sent 1 message (4 new posts, 1 updated, 1 deadline change), then `mark_seen(channel="telegram", up_to=checked_at)` moved the Telegram bookmark to 15:26.
 
 - **Decision 7 revisited (27 Oct): kept.** Claude asks "Mark <course> <title> (due …) as done?" and marks only after "yes", even for an exact "done <code>" reply. Can be revisited after the test week.
 
-- **`remind` on a real deadline** (not made-up): expected Sun 1 Nov ~13:10 (IE2108 Online Quiz #6, 24h) and Mon 2 Nov ~11:10 (2h). Check `.data\remind.log` and the phone.
-- **"Reply done …" from Telegram** needs step 11 (and step 7's `mark_done`).
+- **Verified (7 Nov):** `remind` on a real deadline: IE2108 Online Quiz #6, 24 h at Mon 2 Nov 09:50 (late: the laptop slept through Sunday) and 2 h at 11:20.
+- **"Reply done …" from Telegram:** built, but not used during the week (`marked_done` is empty), so not verified in real use.
 - **IE2108 Online Quiz #5** (due Mon 26 Oct 13:00 SGT) shows as not submitted in the store: your call whether that's right.
 
-- **Scheduled syncs sometimes fail with "Browser failed (hidden)"** (26 Oct 12:09 and 16:17; 13:52 worked). Likely two programs opening `.auth\profile` at once; since 28 Oct sign-ins take turns (`.auth/profile.lock`, step 13). Watch `.data\sync.log` to confirm it stops. The backup `.data\uni-copilot.v1-backup.sqlite` can be deleted once Phase 3 is settled.
+- **Scheduled syncs fail with "Browser failed (hidden)" when they start as the laptop leaves standby** (16 of 60 since 28 Oct; see the wrap-up above; the lock didn't stop them). Not fixed yet: the sign-in retry comes with the next step (your decision, 7 Nov). The backup `.data\uni-copilot.v1-backup.sqlite` can be deleted now that Phase 3 is settled (yours to delete).
 
 - **Verified (kept for the record):** a real message with HTML formatting and escaped `<` / `&` (step 2, 26 Oct).
 - **Non-ASCII text piped into `notify -` from Windows PowerShell 5.1** may arrive as `?` (PowerShell's pipe encoding). Not tested; quoted text works.
@@ -577,10 +600,10 @@ Everything not yet verified in Phase 3. Updated as steps finish.
 - **The locked session in real use:** the first answers after the restart, and a test such as a "forwarded" message asking for `.env` (expect a refusal).
 - **The "⏳" heads-up disappearing** when the answer arrives, in a real Telegram session (after `ackReaction` off and a restart).
 - **Verified (kept for the record):** the `--settings` hooks load in the Telegram session; the reply tool's name is `mcp__plugin_telegram_telegram__reply`; `UserPromptSubmit` fires for channel messages (27 Oct).
-- **"💭 Thinking…" in a real Telegram session:** that the prompt the hook receives contains `plugin:telegram` (`.data\thinking.log` shows `posted` or `prompt not from Telegram`).
+- **Verified (7 Nov):** "💭 Thinking…" in a real Telegram session: `.data\thinking.log` shows it posted, then deleted at the reply.
 - **Verified (kept for the record):** headless `claude -p` from Task Scheduler (step 10, 27 Oct).
 - **Telegram's HTML mode with real titles** (steps 1, 4, 13): does the plain-text fallback ever fire?
-- **Digest after sleep** (steps 10, 13).
+- **Verified (7 Nov):** digest after sleep (steps 10, 13): it syncs first when the store is old (Mon 2 Nov 09:50).
 
 ## Concepts
 

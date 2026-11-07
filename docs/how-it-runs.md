@@ -1,6 +1,6 @@
 # How uni-copilot runs: what happens when, and when the PC is off
 
-Status: 30 Oct 2026 (Phase 3 test week; Phase 4 indexer added, run by hand). All times are Singapore time (the PC's clock).
+Status: 7 Nov 2026 (Phase 3 and Phase 4 done; indexer run by hand). All times are Singapore time (the PC's clock).
 
 ## The short version
 
@@ -14,12 +14,13 @@ Status: 30 Oct 2026 (Phase 3 test week; Phase 4 indexer added, run by hand). All
 ### 1. sync: fetch NTULearn into the store
 
 - **Runs:** every 2 hours from **07:00 to 23:00**: 07:00, 09:00, 11:00, 13:00, 15:00, 17:00, 19:00, 21:00, 23:00 (9 a day). **No syncs between 23:00 and 07:00** (by design).
+- **In practice the times drift:** after a catch-up, the 2-hour rhythm was seen to continue from the catch-up (6 Nov: 09:54, 11:54, 13:54…), sometimes past 23:00 (7 Nov 01:54). Reason not known; harmless.
 - **Takes:** about 1 minute (about 60 read-only requests to NTULearn).
 - **Does:** fetches deadlines, announcements and messages, saves them, writes what changed in the diary.
 - **No AI**, no Claude tokens.
 - **One at a time:** if another sync is already running (e.g. the digest's), this one skips.
 - **Log:** `.data\sync.log`
-- **If it fails** (e.g. signed out): old data is kept. After 6 hours of failed tries you get a ⚠️ sync alert (see remind).
+- **If it fails** (e.g. signed out): old data is kept. After 6 hours of failed tries you get a ⚠️ sync alert (see remind). The usual failure is `Browser failed (hidden)` when it starts as the laptop leaves standby (see "When the PC is off or asleep").
 
 ### 2. remind: deadline reminders
 
@@ -56,7 +57,7 @@ Status: 30 Oct 2026 (Phase 3 test week; Phase 4 indexer added, run by hand). All
 - **First run** ~1 hour (1 request every 2 s); later runs only read what's new or changed, usually a few minutes. Safe to stop with Ctrl+C or to sleep the laptop: everything read is kept, and the next run carries on.
 - **Then it embeds** (phase 2, Gemini, no NTULearn): every new text gets a vector for meaning search, 50 per request, paced under Gemini's free per-minute limits. On the paid tier (billing on the Google Cloud project, `UNI_COPILOT_GEMINI_TIER=paid` in `.env`; since 30 Oct) there's no daily limit and a full run takes minutes. On the free tier (the default setting) it stops cleanly at Gemini's **daily** limit (~1,000 texts) and says when it resets (midnight US Pacific, 15:00 or 16:00 SGT); carry on later with `--embed-only` (no NTULearn at all). A reached monthly spend cap stops it the same way, with its own message. `--no-embed` only reads files; `--max-tokens N` caps one run.
 - **Not run?** Search still works on what was read before; its answers say how many files are covered, how many texts have meaning vectors, and when the indexer last finished. Files you open with `read_file_text` are added on the way (keyword at once; meaning after the next indexer run).
-- Whether to schedule it (poke often, decide in code) is decided after the test week.
+- Not scheduled. Whether to schedule it (poke often, decide in code) is still open.
 
 ## A normal day with the PC on all day
 
@@ -80,8 +81,8 @@ Status: 30 Oct 2026 (Phase 3 test week; Phase 4 indexer added, run by hand). All
 
 **When you open it**, two things can start the jobs again:
 
-1. **Windows' catch-up:** each task has "run as soon as possible after a missed start", so Windows starts a missed run after waking, sometimes at once, sometimes a few minutes later (29 Oct: at 10:53 and again at 10:59:58). A late catch-up **takes the place of the next regular poke** (29 Oct: the 10:59:58 runs replaced remind's 11:10 and digest's 11:05).
-   - **Known weak spot:** on 28 and 29 Oct the first catch-up started while the laptop was still flickering between standby and awake, and Windows cut off the sync and digest runs (`0x41306`).
+1. **Windows' catch-up:** each task has "run as soon as possible after a missed start", so Windows starts a missed run after waking: after a longer sleep (usually your first open of the day), **5–8 minutes later** (27 Oct – 7 Nov: the sync worked 11 of 11 times); after a short standby, **in the same minute**. It can also fire twice (29 Oct: at 10:53 and again at 10:59:58). A late catch-up **takes the place of the next regular poke** (29 Oct: the 10:59:58 runs replaced remind's 11:10 and digest's 11:05).
+   - **Known weak spot:** **a sync that starts in the minute the laptop leaves standby often fails** (`Browser failed (hidden)`; 16 of 26 such runs since 28 Oct, likely because the network isn't back yet; not verified). 12 of the 16 came from opening the lid or pressing the power button. The other 34 runs all worked. Old data is kept, so right after opening the laptop the data can stay up to about 2 hours old, until the next sync. On 28 and 29 Oct Windows also cut such runs off (`0x41306`). Not fixed yet: a sign-in retry after about a minute comes with the next step.
 2. **The next regular poke:** within 30 minutes for remind and digest; the next odd hour for sync.
 
 **Example: you open the laptop at 10:54 (29 Oct):**
@@ -137,6 +138,7 @@ A reminder isn't tied to an exact minute. It's **"the first remind run after the
 | PC asleep / lid closed (not set to stay on) | ✗ | ✗ | ✗ | ✗ |
 | PC on but signed out of Windows | ✗ | ✗ | ✗ | ✗ |
 | PC on, no internet | fails (data kept; ⚠️ alert after 6 h) | ✓ but can't send | can't send (retried, 3 a day) | ✗ |
+| Laptop just left standby (e.g. you opened it) | often fails (data kept; next run works) | ✓ (may fail to send; next run tries again) | ✓ | ✓ if the window is open |
 | NTULearn sign-in expired | fails (⚠️ alert after 6 h); fix: `login` tool at the PC | ✓ (old data) | ✓ (old data) | ✓ |
 | Claude Code updating itself (seen 29 Oct 11:00: `claude.exe` briefly missing) | ✓ | ✓ | that try fails (`couldn't start`), retried at the next poke | restart the window afterwards |
 

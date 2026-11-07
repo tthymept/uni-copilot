@@ -2,7 +2,7 @@
 
 A personal academic agent for NTU students. It reads NTULearn (and later other sources), keeps track of what changed, and tells you what to do, in Telegram or Claude Code. It runs on your own computer with your own login, and never stores passwords.
 
-Status as of 30 Oct 2026: Phase 0 spike passed. **Phase 1 (`ntulearn-mcp` core) done** (24 Oct): 6 read-only tools in Claude Code; details `docs/phase 1/`. **Phase 2 (event store) done** (25 Oct): local SQLite store, `uni-copilot sync` every 2 h via Task Scheduler, change detection, `pilot-mcp` (5 tools, "as of" in every answer, the default for study questions), `weekly-actions` skill; 139 offline tests + 4 opt-in live tests; details `docs/phase 2/phase-2-build-log.md` (overview: `docs/phase 2/phase-2-core.md`). **Phase 3 (Telegram) started** (26 Oct): decisions made, details `docs/phase 3/`; test week until ~3 Nov. **Phase 4 (content and search) done** (29–30 Oct, in parallel with Phase 3's test week): 6 content tools (`list_course_content`, `read_page`, `read_file_text`, `get_assessment`, hybrid `search`, `download_file`) plus `send_course_file` to Telegram, a content cache with keyword (FTS5) and meaning search (Gemini embeddings, paid tier with prepaid credit), an indexer run by hand; 272 offline tests; final checks passed 30 Oct. Details `docs/phase 4/`. A visitor's overview is in `README.md`. "Verified" below means checked on my own account (GET only); "Not verified" means designed but not yet tested.
+Status as of 7 Nov 2026: Phase 0 spike passed. **Phase 1 (`ntulearn-mcp` core) done** (24 Oct): 6 read-only tools in Claude Code; details `docs/phase 1/`. **Phase 2 (event store) done** (25 Oct): local SQLite store, `uni-copilot sync` every 2 h via Task Scheduler, change detection, `pilot-mcp` (5 tools, "as of" in every answer, the default for study questions), `weekly-actions` skill; 139 offline tests + 4 opt-in live tests; details `docs/phase 2/phase-2-build-log.md` (overview: `docs/phase 2/phase-2-core.md`). **Phase 3 (Telegram) done** (7 Nov, after a test week from 27 Oct): `uni-copilot remind`, the morning digest, Q&A from Telegram, `mark_done`; known limit: syncs that start as the laptop leaves standby often fail, then recover; details `docs/phase 3/`. **Phase 4 (content and search) done** (29–30 Oct, in parallel with Phase 3's test week): 6 content tools (`list_course_content`, `read_page`, `read_file_text`, `get_assessment`, hybrid `search`, `download_file`) plus `send_course_file` to Telegram, a content cache with keyword (FTS5) and meaning search (Gemini embeddings, paid tier with prepaid credit), an indexer run by hand; 272 offline tests; final checks passed 30 Oct. Details `docs/phase 4/`. A visitor's overview is in `README.md`. "Verified" below means checked on my own account (GET only); "Not verified" means designed but not yet tested.
 
 ---
 
@@ -342,15 +342,16 @@ Each phase ends with something usable.
 - SQLite schema, `uni-copilot sync` (+ `status`, `events`, `changes`), change detection, `pilot-mcp` (`list_events`, `whats_new`, `get_event`, `mark_seen`, `sync_status`), `weekly-actions` skill (changed from prompt), Task Scheduler sync every 2 h.
 - Done when: two syncs in a row report only real changes. ✓ 25 Oct: two scheduled runs in a row (22:03, 22:06) reported 0 changes; plain questions in a fresh Claude Code session went to pilot and the skill by themselves, and matched NTULearn.
 
-**Phase 3: Telegram** (started 26 Oct 2026; steps and decisions in `docs/phase 3/phase-3-core.md`)
+**Phase 3: Telegram** (done 7 Nov 2026; steps and decisions in `docs/phase 3/phase-3-core.md`)
 - Channel plugin for Q&A, `uni-copilot notify`, `uni-copilot remind`, morning digest (headless `claude -p`), `mark_done`, `send_telegram`.
-- Done when: I get a correct digest and reminders for a week without opening NTULearn.
+- Done when: I get a correct digest and reminders for a week without opening NTULearn. ✓ 7 Nov: 12-day test; store matched live NTULearn, no reminder sent twice, no digest failed since 29 Oct. Known limit in `docs/phase 3/phase-3-build-log.md`.
 
 **Phase 4: content and search** (done 30 Oct 2026, built in parallel with Phase 3's test week; steps and decisions in `docs/phase 4/phase-4-core.md`)
 - Live probe first (done 29 Oct); `list_course_content`, `read_page`, `read_file_text` (file items and files embedded in pages), `get_assessment` (with release conditions; `upcoming_windows` dropped after the probe), hybrid `search` (FTS5 + Gemini embeddings, keyword-only fallback), indexer run by hand, `download_file` (terminal only), caching; `send_course_file` to Telegram after the test week.
 - Done when: content questions ("what does this week's lecture cover?", "where did they say what the quiz covers?") are answered from the files with sources; meaning search finds what keywords miss, and still answers keyword-only when Gemini is unavailable; Phase 3 keeps running untouched.
 
 **Phase 5: recordings and study pipeline**
+- First, carried over from Phase 3 (decided 7 Nov): on a failed hidden sign-in, wait about a minute and try once more, so a sync that starts as the laptop leaves standby recovers by itself. Details in `docs/phase 3/phase-3-build-log.md`.
 - `list_recordings`, `get_transcript`, lecture-notes skill (slides correct the transcript).
 
 **Phase 6: Google Calendar**
