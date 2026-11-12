@@ -2,7 +2,7 @@
 
 A personal academic agent for NTU students. It reads NTULearn (and later other sources), keeps track of what changed, and tells you what to do, in Telegram or Claude Code. It runs on your own computer with your own login, and never stores passwords.
 
-Status as of 7 Nov 2026: Phase 0 spike passed. **Phase 1 (`ntulearn-mcp` core) done** (24 Oct): 6 read-only tools in Claude Code; details `docs/phase 1/`. **Phase 2 (event store) done** (25 Oct): local SQLite store, `uni-copilot sync` every 2 h via Task Scheduler, change detection, `pilot-mcp` (5 tools, "as of" in every answer, the default for study questions), `weekly-actions` skill; 139 offline tests + 4 opt-in live tests; details `docs/phase 2/phase-2-build-log.md` (overview: `docs/phase 2/phase-2-core.md`). **Phase 3 (Telegram) done** (7 Nov, after a test week from 27 Oct): `uni-copilot remind`, the morning digest, Q&A from Telegram, `mark_done`; known limit: syncs that start as the laptop leaves standby often fail, then recover; details `docs/phase 3/`. **Phase 4 (content and search) done** (29–30 Oct, in parallel with Phase 3's test week): 6 content tools (`list_course_content`, `read_page`, `read_file_text`, `get_assessment`, hybrid `search`, `download_file`) plus `send_course_file` to Telegram, a content cache with keyword (FTS5) and meaning search (Gemini embeddings, paid tier with prepaid credit), an indexer run by hand; 272 offline tests; final checks passed 30 Oct. Details `docs/phase 4/`. A visitor's overview is in `README.md`. "Verified" below means checked on my own account (GET only); "Not verified" means designed but not yet tested.
+Status as of 12 Nov 2026: Phase 0 spike passed. **Phase 1 (`ntulearn-mcp` core) done** (24 Oct): 6 read-only tools in Claude Code; details `docs/phase 1/`. **Phase 2 (event store) done** (25 Oct): local SQLite store, `uni-copilot sync` every 2 h via Task Scheduler, change detection, `pilot-mcp` (5 tools, "as of" in every answer, the default for study questions), `weekly-actions` skill; 139 offline tests + 4 opt-in live tests; details `docs/phase 2/phase-2-build-log.md` (overview: `docs/phase 2/phase-2-core.md`). **Phase 3 (Telegram) done** (7 Nov, after a test week from 27 Oct): `uni-copilot remind`, the morning digest, Q&A from Telegram, `mark_done`; known limit: syncs that start as the laptop leaves standby often fail, then recover; details `docs/phase 3/`. **Phase 4 (content and search) done** (29–30 Oct, in parallel with Phase 3's test week): 6 content tools (`list_course_content`, `read_page`, `read_file_text`, `get_assessment`, hybrid `search`, `download_file`) plus `send_course_file` to Telegram, a content cache with keyword (FTS5) and meaning search (Gemini embeddings, paid tier with prepaid credit), an indexer run by hand; 272 offline tests; final checks passed 30 Oct. Details `docs/phase 4/`. **Phase 6 (schedule: reading and planning) started 7 Nov:** a sign-in retry first (built 12 Nov, being checked in the sync log), then a look at my Google Calendar (which already holds my exams) to decide what's worth building: calendar answers from Telegram, teaching weeks, exam reminders, free time; details `docs/phase 6/`. On 7 Nov the roadmap was reordered: Phase 6 reads and plans, Phase 7 writes with my permission (Google Calendar, forwarded messages); Phase 5 (recordings) is on hold. A visitor's overview is in `README.md`. "Verified" below means checked on my own account (GET only); "Not verified" means designed but not yet tested.
 
 ---
 
@@ -13,8 +13,9 @@ Status as of 7 Nov 2026: Phase 0 spike passed. **Phase 1 (`ntulearn-mcp` core) d
 1. Answer "what do I need to do this week?" in one message, with every item citing its source.
 2. Push what matters without being asked: a morning digest when something changed, reminders before unfinished deadlines, alerts for new announcements.
 3. Turn lecture recordings and slides into study notes.
-4. Put deadlines into Google Calendar, with my confirmation for every write.
-5. Be a clean, well-tested project I can explain end to end in an internship interview (event pipeline, local state, agent design, security).
+4. Know my week: teaching week, classes, exams and free time, so plans fit the real schedule (Phase 6).
+5. Put deadlines, exams and study blocks into Google Calendar, with my confirmation for every write (Phase 7).
+6. Be a clean, well-tested project I can explain end to end in an internship interview (event pipeline, local state, agent design, security).
 
 **Non-goals**
 
@@ -38,9 +39,9 @@ Status as of 7 Nov 2026: Phase 0 spike passed. **Phase 1 (`ntulearn-mcp` core) d
  Google Calendar  ───────┤  (Claude connector) │
  NTU Outlook email  ─────┤  (Claude connector) │      ┌──────────────┐
  Academic calendar  ─────┤                     ├────► │  Claude Code │ ──► Telegram (Q&A, via channels plugin)
- Exam timetable  ────────┤──► pilot-mcp ◄──────┘      │  (the agent) │ ──► Telegram push (digest, reminders)
- Class timetable  ───────┤   (event store,            │  skills +    │ ──► Google Calendar (confirmed writes)
- Forwarded messages  ────┘    whats_new, notify)      │  prompts     │ ──► Notes folder (lecture notes)
+ Exams (if imported) ────┤──► pilot-mcp ◄──────┘      │  (the agent) │ ──► Telegram push (digest, reminders)
+ Forwarded messages  ────┘   (event store,            │  skills +    │ ──► Google Calendar (confirmed writes, Phase 7)
+                              whats_new, notify)      │  prompts     │ ──► Notes folder (lecture notes, Phase 5)
                                     ▲                 └──────────────┘ ──► Claude Code terminal / Remote Control
                                     │
                            uni-copilot sync / remind
@@ -49,7 +50,7 @@ Status as of 7 Nov 2026: Phase 0 spike passed. **Phase 1 (`ntulearn-mcp` core) d
 
 Three layers:
 
-1. **Sources.** Each source is reached through an MCP server or a Claude connector. My own server, `ntulearn-mcp`, does live read-only calls to NTULearn and NTULearnVideo.
+1. **Sources.** Each source is reached through an MCP server or a Claude connector. My own server, `ntulearn-mcp`, does live read-only calls to NTULearn and NTULearnVideo. A connector (Google Calendar, Outlook) only works inside a Claude chat: scheduled scripts and the locked Telegram session can't use it.
 2. **Core.** A local SQLite **event store** that every source feeds into, in one common format. A `sync` job fills it; `whats_new` compares runs. A second MCP server, `pilot-mcp`, exposes the store, manual events and notifications to Claude.
 3. **Channels.** Claude Code is the agent. Telegram is the main way I talk to it. Scheduled jobs push digests and reminders.
 
@@ -63,11 +64,11 @@ Rule of thumb: **deterministic work runs as plain scripts (no AI usage); judgeme
 |---|---|---|---|---|---|
 | 1 | **NTULearn** (Blackboard Learn Ultra) | `ntulearn-mcp`, cookies from a Playwright login | Courses, deadlines, announcements, messages, content, files, grades (opt-in) | Mostly verified | 1 |
 | 2 | **NTULearnVideo** (Kaltura) | `ntulearn-mcp`, session from an LTI launch | Recordings, transcripts (JSON), module videos | Verified | 5 |
-| 3 | **Google Calendar** | Claude's built-in Google Calendar connector | Free/busy time (read), deadline events (write, confirmed) | Not set up | 6 |
-| 4 | **NTU Outlook email** | Claude Microsoft 365 / Outlook connector, if available | Emails from profs and school offices | Not verified; NTU may block third-party app access | 7 |
-| 5 | **NTU academic calendar** | Public page → a YAML file I update each semester | Teaching week number ↔ dates, recess, holidays | Not verified | 7 |
-| 6 | **Exam timetable** | Official NTU source → a small CSV I import each semester | My exam dates, times, venues | Not verified | 7 |
-| 7 | **Class timetable** | Import from my calendar, or a YAML/ICS I maintain | Class times and venues | Not verified | 7 |
+| 3 | **Google Calendar** | Read: Claude's Google Calendar connector (in a chat); programs would need an `.ics` export, the private iCal address or the API. Write: the connector or the Google Calendar API, decided in Phase 7 | My exams (already there), classes and other events (read); deadlines, exams, study blocks (write, confirmed) | Connector configured, not signed in | 6 (read), 7 (write) |
+| 4 | **NTU Outlook email** | Claude Microsoft 365 / Outlook connector, if available | Emails from profs and school offices | Not verified; NTU may block third-party app access | 6 (check) |
+| 5 | **NTU academic calendar** | Public page → a YAML (or TOML) file I update each semester, read by pilot's `week_info` | Teaching week number ↔ dates, recess, holidays, exam period | Not verified; only if my Google Calendar doesn't show teaching weeks | 6 |
+| 6 | **Exam timetable** | Already in my Google Calendar; imported into the store only if Telegram exam reminders are wanted (decided after the Phase 6 calendar look) | My exam dates, times, venues | Not verified | 6 |
+| 7 | **Class timetable** | My Google Calendar, if my classes are there; otherwise a YAML/ICS I maintain | Class times and venues | Not verified | 6 |
 | 8 | **Group project tools** (Google Drive, Notion, GitHub) | Claude connectors, read-only | Group docs and tasks | Optional | 8 |
 | 9 | **Forwarded messages** | I forward a Telegram message to my bot | Info from course group chats | Design only | 7 |
 
@@ -143,7 +144,7 @@ Phase 1 tools are built as described below (✓). Every `course` argument accept
 
 ### 5.1 Event store (SQLite, local, git-ignored)
 
-Built in Phase 2 (✓): `.data/uni-copilot.sqlite`, code in `src/uni_copilot/store/` (`models.py`, `db.py`, `events.py`, `sync.py`, `queries.py`) and `src/uni_copilot/sources/ntulearn.py`. Phase 2 uses the sources `ntulearn_gradebook`, `ntulearn_announcement`, `ntulearn_message`, the kinds `deadline`, `announcement`, `message`, and the statuses `open`, `submitted`, `graded`, `done`; the rest of the lists below are for later phases.
+Built in Phase 2 (✓): `.data/uni-copilot.sqlite`, code in `src/uni_copilot/store/` (`models.py`, `db.py`, `events.py`, `sync.py`, `queries.py`) and `src/uni_copilot/sources/ntulearn.py`. Phase 2 uses the sources `ntulearn_gradebook`, `ntulearn_announcement`, `ntulearn_message`, the kinds `deadline`, `announcement`, `message`, and the statuses `open`, `submitted`, `graded`, `done`; Phase 6 may add the source `exam_timetable` and the kind `exam` (only if exams are imported; decided after the Google Calendar look); the rest of the lists below are for later phases.
 
 Every source is converted into one **event** shape:
 
@@ -165,7 +166,7 @@ Other tables:
 - ✓ `event_changes`: what changed and when (new, edited, moved, status_changed, removed), with before/after. Powers `whats_new` and the digest.
 - `notifications_sent`: which reminder went out for which event, so nothing is sent twice. Key: event, tier (24h / 2h) and due time, so a moved deadline is reminded again. (Sync alerts are noted in `state`, since they aren't about one event.) Written only after Telegram accepted the message. (Phase 3, schema version 2)
 - `marked_done`: items I handled outside NTULearn (Gradescope, Google Forms). Separate from `status`, so sync never overwrites it; reminders skip these. (Phase 3)
-- `calendar_links`: `event_id` ↔ Google Calendar event id. (Phase 6)
+- `calendar_links`: `event_id` ↔ Google Calendar event id. (Phase 7; maybe not needed if each Google event carries the `event_id` itself)
 - ✓ `state`: last sync time, last attempt, last error and notes per source; last "seen" time per channel.
 
 Phase 2 decisions and how they were built (25 Oct):
@@ -188,21 +189,22 @@ Phase 2 decisions and how they were built (25 Oct):
 - `uni-copilot remind`: find open deadlines (not submitted, not marked done) that have come within 24 h / 2 h → one Telegram message per run, grouped, soonest first, ending with "as of" → record in `notifications_sent`. Every 30 min, all day, at :10 and :40 (no quiet hours, decided 26 Oct). Tests are reminded like any deadline; their logistics come from the AI digest. Also one alert per failure streak when a sync attempt fails and the last success is over 6 h old. Store-only: never contacts NTULearn. `--dry-run` prints instead of sending. (Phase 3)
 - `uni-copilot notify "<text>"` (or `-` for stdin): send a plain-text Telegram message, for scripts and testing. (Phase 3)
 - `uni-copilot done <event_id>` (`--undo`): mark an item done locally. `uni-copilot telegram-chat-id`: one-off setup helper, before the plugin polls. (Phase 3)
+- If exams are imported (Phase 6, decided after the calendar look): `uni-copilot import-exams [--dry-run]` (checks every row, saves through `save_events` so moved and removed exams reach the diary), and `uni-copilot remind` also sends "Exam tomorrow" and "Exam in 2 hours: course, venue, what to bring", never "not submitted". Otherwise Google Calendar's own notifications remind me of exams.
 
 ### 5.3 `pilot-mcp` tools (local state only; never touches NTULearn)
 
 Built in Phase 2 (✓): `src/uni_copilot/pilot_mcp/`, registered in `.mcp.json`, all five pre-allowed. Every result carries `as_of` (oldest last sync, SGT, minutes old, failed sources), and the server instructions make it **the default for study questions** (Claude says "as of", and uses the live `ntulearn` tools only for "right now" checks or what the store doesn't have).
 
-- ✓ `list_events(days=7, kinds=None, course=None)`: deadlines due in the next N days + posts from the last N days, with previews.
+- ✓ `list_events(days=7, kinds=None, course=None)`: deadlines due in the next N days + posts from the last N days, with previews. Phase 6: upcoming exams too, if they're imported.
 - ✓ `whats_new(channel="terminal")`: changes since the channel last looked, with full bodies of new/edited posts, plus `checked_at`. Only reads.
 - ✓ `get_event(event_id)`: one item with its full body.
 - ✓ `mark_seen(channel, up_to=checked_at)`: moves the channel's "last seen" bookmark (only writes our own state).
 - ✓ `sync_status()`: last sync, last error and notes per source, and counts.
-- `add_manual_event(...)`: for forwarded messages or things I tell the bot; always confirmed first.
 - `mark_done(event_id, undo=False)`: an item I've handled outside NTULearn; shown as "done (marked by you)", no more reminders. Local only, undoable, pre-allowed, but Claude confirms in the chat first and only when I asked. (Phase 3)
 - `send_telegram(text)`: push a plain-text message, only ever to my own chat id from `.env`. Used by the morning digest. Pre-allowed. (Phase 3)
-- `week_info(date)`: teaching week number, recess, holidays (from the academic calendar file).
-- `link_calendar_event(event_id, gcal_event_id)`: bookkeeping for calendar sync.
+- `add_manual_event(...)`: for forwarded messages or things I tell the bot; always confirmed first. Stays in pilot because Python is the store's only writer. (Phase 7)
+- `link_calendar_event(event_id, gcal_event_id)`: bookkeeping for calendar sync, if `calendar_links` is needed. (Phase 7)
+- `week_info(date)`: teaching week number, recess, holidays, exam period (from the academic calendar file). (Phase 6, if my Google Calendar doesn't show teaching weeks)
 
 ---
 
@@ -215,11 +217,13 @@ Built in Phase 2 (✓): `src/uni_copilot/pilot_mcp/`, registered in `.mcp.json`,
 | 3 | **Deadline reminders**: 24 h and 2 h before unfinished items, day or night (no quiet hours) | `uni-copilot remind` via Task Scheduler, every 30 min | No | 3 |
 | 4 | **Weekly actions checklist** with sources | `weekly-actions` skill (✓ Phase 2 in Claude Code; Telegram in Phase 3) | Yes | 2–3 |
 | 5 | **Lecture notes**: transcript (corrected using slides) → notes, revision sheet, practice questions in my notes folder; Telegram "Week 10 notes ready" | Claude Code skill | Yes | 5 |
-| 6 | **Calendar sync**: proposes deadlines for Google Calendar; I confirm by replying; dedupe via `[uni-copilot:<event_id>]` marker in the event description | Claude Code skill + Google Calendar connector | Yes | 6 |
-| 7 | **Workload planner**: counts back from deadlines/exams, checks free time, proposes study blocks | Claude Code skill | Yes | 6 |
-| 8 | **Weekly review** (Sunday): done, slipped, next week's load | Scheduled task | Yes | 8 |
-| 9 | **Forward-to-add**: forward a group-chat message to the bot → proposed event → confirm | Telegram channel + `add_manual_event` | Yes | 7 |
-| 10 | **Remote Control fallback**: continue a Claude Code session from the Claude phone app | `/remote-control` | Yes | any |
+| 6 | **Exam reminders**: "Exam tomorrow", "Exam in 2 hours: course, venue, what to bring" | Google Calendar's own notifications, or `uni-copilot remind` if exams are imported (decided after the calendar look) | No | 6 |
+| 7 | **Schedule answers**: upcoming exams, what's on a day, teaching week, recess | Claude + Google Calendar connector; pilot `week_info` if needed | Yes | 6 |
+| 8 | **Workload planner**: checks free time in my calendar, counts back from deadlines and exams, proposes study blocks | Claude + Google Calendar connector, in `weekly-actions` | Yes | 6 (propose), 7 (write) |
+| 9 | **Calendar sync**: proposes deadlines, exams and study blocks for Google Calendar; I confirm by replying; never duplicated | Claude connector + skill, or our own tool with the Google Calendar API (decided in Phase 7) | Yes | 7 |
+| 10 | **Forward-to-add**: forward a group-chat message to the bot → proposed event → confirm | Telegram channel + `add_manual_event` | Yes | 7 |
+| 11 | **Weekly review** (Sunday): done, slipped, next week's load | Scheduled task | Yes | 8 |
+| 12 | **Remote Control fallback**: continue a Claude Code session from the Claude phone app | `/remote-control` | Yes | any |
 
 **Stretch: custom "NTULearn watcher" channel.** Claude Code lets you build your own channel (an MCP server that pushes events into a running session). The watcher would detect a new announcement or moved deadline and push it into the session; Claude decides whether it's worth a Telegram message. During the research preview, custom channels need `--dangerously-load-development-channels`. Phase 8.
 
@@ -238,7 +242,8 @@ uni-copilot/
 │   ├── phase 1/                   # phase-1-core.md (overview), phase-1-build-log.md (details)
 │   ├── phase 2/                   # phase-2-core.md, phase-2-build-log.md
 │   ├── phase 3/                   # phase-3-core.md, phase-3-build-log.md
-│   └── phase 4/                   # phase-4-core.md, phase-4-build-log.md
+│   ├── phase 4/                   # phase-4-core.md, phase-4-build-log.md
+│   └── phase 6/                   # phase-6-core.md, phase-6-build-log.md (Phase 5 is on hold)
 ├── scripts/
 │   ├── schedule-sync.ps1          # registers the "uni-copilot sync" scheduled task (Phase 2)
 │   ├── schedule-remind.ps1        # "uni-copilot remind" every 30 min (Phase 3)
@@ -256,7 +261,7 @@ uni-copilot/
 │   │   └── models.py
 │   ├── store/                     # models.py, db.py (schema), events.py (upsert + change detection),
 │   │                              # sync.py (one sync, removal rules), queries.py (read side)
-│   ├── sources/                   # ntulearn.py (adapters + content_hash); later academic calendar, exams, timetable
+│   ├── sources/                   # ntulearn.py (adapters + content_hash); later academic calendar, exams (if imported)
 │   ├── pilot_mcp/                 # MCP server 2: server.py + models.py (store; later manual events, notify)
 │   ├── notify/telegram.py         # Bot API sendMessage, .env reader (Phase 3)
 │   └── cli.py                     # uni-copilot sync | status | events | changes (Phase 3: remind | notify | done)
@@ -264,7 +269,7 @@ uni-copilot/
 │   ├── settings.json              # allow rules for read-only tools (+ pilot mark_seen)
 │   └── skills/                    # weekly-actions (✓), morning-digest, calendar-sync,
 │                                  # lecture-notes, workload-planner, weekly-review
-├── data/                          # academic_calendar.yaml, exams.csv, timetable.yaml (my own, git-ignored)
+├── data/                          # academic_calendar.yaml, exams or timetable files if needed (my own, git-ignored)
 ├── tests/
 │   └── fixtures/                  # synthetic only
 ├── spike_session_check.py         # login spike (keep until phase 1 is done)
@@ -286,7 +291,7 @@ Local, never committed: `.auth/profile` (browser profile with login cookies), `.
      }
    }
    ```
-2. **Google Calendar**: claude.ai → Settings → Connectors → Google Calendar → Connect. Block "delete event". Check `/mcp` in Claude Code.
+2. **Google Calendar**: claude.ai → Settings → Connectors → Google Calendar → Connect (Phase 6: for a read-only look). Block "delete event". Check `/mcp` in Claude Code. A connector only works inside a Claude chat: the scheduled jobs and the locked Telegram session can't use it (whether the Telegram session may get its read tools is a Phase 6 question).
 3. **Telegram bot**: create with BotFather. Same bot for both directions:
    - Q&A: `/plugin install telegram@claude-plugins-official`, `/telegram:configure <token>`, start with `claude --channels plugin:telegram@claude-plugins-official`, pair, then `/telegram:access policy allowlist`. Needs Bun.
    - Push: `notify/telegram.py` calls `sendMessage` with the same token and my chat id from `.env` (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`; I type them in myself, never into a Claude chat). Sending doesn't conflict with the plugin's polling; never run a second poller (the one-off `telegram-chat-id` helper runs before the plugin is set up).
@@ -304,6 +309,7 @@ Local, never committed: `.auth/profile` (browser profile with login cookies), `.
 - **"What do I need to do this week?" (Telegram)** → channel plugin → Claude Code → `weekly-actions` skill → `pilot.list_events` (deadlines, recent posts) + `pilot.get_event` (full text of every post from the last 7 days) + `pilot.whats_new` → checklist with sources and "as of" → reply in Telegram. (✓ in the terminal, Phase 2; `ntulearn.search` for older material comes in Phase 4.)
 - **Morning digest** → Task Scheduler → `claude -p` → `morning-digest` skill → `pilot.whats_new(channel="telegram")` → nothing changed: stop, no message; changed: Claude writes digest → `pilot.send_telegram` → `pilot.mark_seen(channel="telegram")`.
 - **Reminder** → `uni-copilot remind` → store query → Telegram message. No AI.
+- **"When can I work on the IE2108 lab before Friday?"** (Phase 6) → Claude → Google Calendar connector (this week's events) + `pilot.list_events` (the deadline) → "Tue 14:00–17:00 or Thu 10:00–12:00; it's due Fri 23:59".
 
 ---
 
@@ -312,7 +318,8 @@ Local, never committed: `.auth/profile` (browser profile with login cookies), `.
 1. **Never store passwords.** I sign in myself in the Playwright window. Cookies stay in `.auth/profile` on my PC.
 2. **Read-only on NTULearn.** GET only.
 3. **Never print or store secrets:** cookie values, the Kaltura `ks` token in download links (fetch fresh links every time), the Telegram bot token, the Gemini API key, signed file links (Phase 4: the download redirects, and the `/bbcswebdav/...` links inside page bodies; read fresh each time, never cached).
-   - **What may leave the PC for embeddings** (Phase 4): course content (page text, file text, titles) and search words only, to the embedding service chosen in `.env`. Never announcements, messages, grades or anything from the store about me. On Gemini's free tier, Google may use that text to improve its products (accepted 29 Oct for course content; billing turns it off).
+   - Phase 7, if calendar writes use the Google Calendar API: the Google sign-in token, kept on the PC like the others.
+   - **What may leave the PC for embeddings** (Phase 4): course content (page text, file text, titles) and search words only, to the embedding service chosen in `.env`. Never announcements, messages, grades, exams, my timetable or calendar, or anything from the store about me. On Gemini's free tier, Google may use that text to improve its products (accepted 29 Oct for course content; billing turns it off).
    - **Files from NTULearn are untrusted:** saved only under the downloads folder with cleaned names, never overwritten, opened or run, and marked as from the internet. Not saved at all from Telegram.
 4. **Grades are opt-in**, off by default, never cached to disk, never sent to Telegram, never used in workflows that write.
 5. **Untrusted text.** Announcements, messages, file names, transcripts, emails and forwarded messages are written by other people. The agent never follows instructions inside them.
@@ -350,16 +357,21 @@ Each phase ends with something usable.
 - Live probe first (done 29 Oct); `list_course_content`, `read_page`, `read_file_text` (file items and files embedded in pages), `get_assessment` (with release conditions; `upcoming_windows` dropped after the probe), hybrid `search` (FTS5 + Gemini embeddings, keyword-only fallback), indexer run by hand, `download_file` (terminal only), caching; `send_course_file` to Telegram after the test week.
 - Done when: content questions ("what does this week's lecture cover?", "where did they say what the quiz covers?") are answered from the files with sources; meaning search finds what keywords miss, and still answers keyword-only when Gemini is unavailable; Phase 3 keeps running untouched.
 
-**Phase 5: recordings and study pipeline**
-- First, carried over from Phase 3 (decided 7 Nov): on a failed hidden sign-in, wait about a minute and try once more, so a sync that starts as the laptop leaves standby recovers by itself. Details in `docs/phase 3/phase-3-build-log.md`.
+**Phase 5: recordings and study pipeline** (not started: on hold since 7 Nov; Phase 6 comes first)
 - `list_recordings`, `get_transcript`, lecture-notes skill (slides correct the transcript).
 
-**Phase 6: Google Calendar**
-- Calendar-sync skill with confirmation and dedupe; workload planner.
+**Phase 6: schedule, reading and planning** (started 7 Nov 2026; steps and decisions in `docs/phase 6/phase-6-core.md`)
+- ✓ First, carried over from Phase 3 (decided 7 Nov, built 12 Nov): when the hidden browser fails at sign-in (`BrowserFailed`), the sync waits a minute and tries once more, so a sync that starts as the laptop leaves standby can recover by itself. Being checked against `.data\sync.log`. Details in `docs/phase 6/phase-6-build-log.md`.
+- A trial of my Google Calendar through Claude's connector (it already holds my exams): read-only look, real questions, and whether the Telegram session can use the connector's read tools. It decides the rest of the phase.
+- Then, as the trial shows: calendar answers from Telegram; teaching weeks (academic calendar file + pilot `week_info`) if the calendar doesn't show them; exam reminders, either Google Calendar's own notifications or exams imported into the store and reminded by `remind` (`kind = exam` with `starts_at`, "Exam tomorrow" / "Exam in 2 hours: course, venue, what to bring", never "not submitted"; noted 27 Oct); free time and proposed study blocks in `weekly-actions`.
+- A check whether an NTU Outlook connector works (reading only).
+- Until exams are covered, only NTULearn gradebook items are reminded; a paper test that appears as a gradebook deadline can be silenced with `uni-copilot done`.
+- Done when: schedule and free-time questions are answered correctly; exams are reminded one way or the other; the scheduled jobs keep running.
 
-**Phase 7: more sources**
-- Academic calendar, exam timetable, class timetable, forward-to-add, Outlook (if the connector works with NTU).
-- Exams get their own reminder in `remind` (noted 27 Oct): `kind = exam` with `starts_at`, worded "Exam in 2 hours: course, venue, what to bring", never "not submitted". Until then, only NTULearn gradebook items are reminded; on 27 Oct all test-like ones were online quizzes taken on NTULearn (4 of 35), where "not submitted" is right. A paper test that appears as a gradebook deadline can be silenced with `uni-copilot done`.
+**Phase 7: writing with permission** (planned; follows Phase 6)
+- Google Calendar writes: deadlines, exams and study blocks, each after my "yes", never duplicated. Where: Claude's connector with a skill, or our own tool with the Google Calendar API, which also works from the Telegram session; decided when the phase starts.
+- Forward-to-add: a forwarded group-chat message → proposed event → my confirmation → `add_manual_event` (pilot). Open: how to confirm from Telegram (prompts wait at the PC; `mark_done`'s pattern is pre-allowed plus "yes?" in the chat).
+- Done when: a confirmed proposal appears in Google Calendar once, a declined one never does, and text in a post or forwarded message can't trigger a write.
 
 **Phase 8: stretch**
 - Custom NTULearn watcher channel, discussions, groups, module progress, weekly review.
@@ -376,7 +388,6 @@ Each phase ends with something usable.
 - Store tests: dedupe, edits, moved deadlines, removed items, reminder de-duplication. ✓ Phase 2: `tests/test_store.py`, `test_sources.py`, `test_sync.py` (failure rules with fake clients), `test_queries.py`, `test_pilot.py`. ✓ Phase 3: `test_reminders.py` (tiers, send once, moved, sync-alert streaks, message layout, `remind` / `done`), `test_telegram.py` (fake Bot API session: splitting, escaping, fallback, retries, token never in errors, "💭 Thinking…" hooks), pilot `mark_done` / `send_telegram` / `delete_telegram_message`. 176 offline tests.
 - Opt-in live smoke tests (my account, GET only) that print counts and status codes only.
 - MCP Inspector (`uv run mcp dev ...`) for manual tool checks.
-
 ---
 
 ## 11. Open questions
@@ -399,8 +410,9 @@ Each phase ends with something usable.
 - Telegram channel plugin: does it support inline buttons? Can its reply tool be used from a scheduled run? (Design assumes reply-to-confirm and our own `sendMessage`, so neither is needed.) ✓ 27 Oct (Phase 3 step 11): runs on Windows with Bun (the plugin's `bun install` had to succeed first); takes `TELEGRAM_BOT_TOKEN` from the environment, so `scripts/start-telegram.ps1` passes it from `.env` and `/telegram:configure` isn't needed; picks pilot and `weekly-actions` from Telegram. Permission relay isn't documented for this plugin: prompts wait at the PC.
 - ✓ Headless `claude -p` from Task Scheduler (Phase 3 step 10, 27 Oct): loads the project MCP servers, `.claude/settings.json` and skills; per-run `--allowedTools` / `--disallowedTools`; uses the Claude plan. A PowerShell window may flash briefly.
 - Using the servers outside Claude Code (your idea, 30 Oct; not Phase 4). Claude Desktop on this PC can start the same local servers (its own config file, pointing at `uv run ntulearn-mcp` / `pilot-mcp` in this folder), so the store and the content cache would just work there; not tried. claude.ai on the web or phone can only reach **remote** MCP servers (over HTTPS, with sign-in), so the servers, the store and the NTULearn sign-in would have to run somewhere reachable from the internet (a hosted server, or a tunnel to this PC): a bigger security question (cookies and course files off the PC). Also open: whether `search` should move to `pilot` (it's local like pilot; it sits in `ntulearn_mcp` with the content cache and indexer that fill it, and pilot wasn't touched during the test week).
-- Outlook connector availability with NTU's Microsoft tenant.
-- Official sources and formats for the academic calendar and exam timetable.
+- Phase 6: Outlook connector availability with NTU's Microsoft tenant.
+- Phase 6: how my exams and classes are written in Google Calendar (course, venue, notifications); whether the locked Telegram session can use the connector's read tools; the official source and format of the academic calendar.
+- Phase 7: Google Calendar writes through the connector or the API; whether a hidden tag on each Google event (private extended property) can replace `calendar_links` for dedupe.
 
 ---
 
@@ -502,7 +514,7 @@ Each phase ends with something usable.
 
 - Python ≥ 3.12 with `uv`. Windows + PowerShell.
 - MCP Python SDK `mcp>=2.3,<3`: `from mcp.server import MCPServer`; `@mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))` (`from mcp.types import ToolAnnotations`); `mcp.run(transport="stdio")`; raise `ToolError` for errors the model should see.
-- Playwright (Chromium), `requests`, SQLite (stdlib; FTS5 for search, checked 29 Oct: SQLite 3.53.1), pypdf (chosen over PyMuPDF for its licence; pypdfium2 as fallback), python-pptx, numpy (vector maths), PyYAML.
+- Playwright (Chromium), `requests`, SQLite (stdlib; FTS5 for search, checked 29 Oct: SQLite 3.53.1), pypdf (chosen over PyMuPDF for its licence; pypdfium2 as fallback), python-pptx, numpy (vector maths). PyYAML is planned for the calendar file but not installed yet (Phase 6 may use TOML with the built-in `tomllib` instead).
 - Embeddings (Phase 4): Google Gemini API `gemini-embedding-001` over plain `requests`, free tier, own Google Cloud project; swappable for OpenRouter or `fastembed` (local).
 - Claude Code: channels (Telegram plugin, research preview, needs Bun), Desktop local scheduled tasks, Remote Control, Google Calendar connector.
 - Telegram Bot API (free) for push messages.

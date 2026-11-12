@@ -588,7 +588,7 @@ Everything not verified in Phase 3, updated at the wrap-up (7 Nov). Still open: 
 - **"Reply done …" from Telegram:** built, but not used during the week (`marked_done` is empty), so not verified in real use.
 - **IE2108 Online Quiz #5** (due Mon 26 Oct 13:00 SGT) shows as not submitted in the store: your call whether that's right.
 
-- **Scheduled syncs fail with "Browser failed (hidden)" when they start as the laptop leaves standby** (16 of 60 since 28 Oct; see the wrap-up above; the lock didn't stop them). Not fixed yet: the sign-in retry comes with the next step (your decision, 7 Nov). The backup `.data\uni-copilot.v1-backup.sqlite` can be deleted now that Phase 3 is settled (yours to delete).
+- **Scheduled syncs fail with "Browser failed (hidden)" when they start as the laptop leaves standby** (16 of 60 since 28 Oct; see the wrap-up above; the lock didn't stop them). Fix built in Phase 6 step 0 (12 Nov): the sync now retries the sign-in once after 1 minute; whether it works is checked against `.data\sync.log` (see `docs/phase 6/phase-6-build-log.md`). The backup `.data\uni-copilot.v1-backup.sqlite` can be deleted now that Phase 3 is settled (yours to delete).
 
 - **Verified (kept for the record):** a real message with HTML formatting and escaped `<` / `&` (step 2, 26 Oct).
 - **Non-ASCII text piped into `notify -` from Windows PowerShell 5.1** may arrive as `?` (PowerShell's pipe encoding). Not tested; quoted text works.

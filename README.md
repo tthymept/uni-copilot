@@ -25,9 +25,9 @@ Built in phases. Each phase ends with something usable, and has its own design n
 | 2 | Local event store, scheduled `sync` with change detection, `pilot-mcp`, weekly checklist skill | Done |
 | 3 | Telegram: Q&A from a phone, morning digest, deadline reminders, "mark as done" | Done |
 | 4 | Course content and search: folders, pages, slide/PDF/notebook text, quiz details, hybrid keyword + meaning search, downloads, sending files to Telegram | Done |
-| 5 | Lecture recordings and transcripts, lecture-notes skill | Planned |
-| 6 | Google Calendar sync (confirmed writes), workload planner | Planned |
-| 7 | More sources: academic calendar, exam and class timetables, forwarded messages, Outlook | Planned |
+| 5 | Lecture recordings and transcripts, lecture-notes skill | On hold |
+| 6 | Schedule, reading and planning: Google Calendar (exams, classes, free time), teaching weeks, exam reminders | In progress |
+| 7 | Writing with permission: Google Calendar events (deadlines, exams, study blocks), forwarded messages | Planned |
 | 8 | Stretch: a live NTULearn "watcher" channel, groups, weekly review | Planned |
 | 9 | Sharing: install guide, policy check, packaging | Planned |
 
@@ -275,17 +275,18 @@ Most modules also have a self-test: `uv run python -m uni_copilot.ntulearn_mcp.<
 
 ## Roadmap
 
-From [`docs/uni-copilot-project-plan.md`](docs/uni-copilot-project-plan.md):
+From [`docs/uni-copilot-project-plan.md`](docs/uni-copilot-project-plan.md). Phase 6 is in progress; Phase 5 is on hold.
 
 - **Phase 5: recordings and study pipeline.**
   - `list_recordings` and `get_transcript`, for NTULearnVideo (Kaltura): Media Gallery recordings and videos embedded in course pages, with timestamped transcripts and "exam signal" segments.
   - A `lecture-notes` skill that turns a transcript into notes, corrected against the slides, plus a revision sheet and practice questions. Telegram gets a "notes ready" message.
-- **Phase 6: Google Calendar.**
-  - A calendar-sync skill that proposes deadline events and writes only after confirmation, deduplicated by an event marker.
-  - A workload planner that counts back from deadlines and exams and proposes study blocks in free time.
-- **Phase 7: more sources.**
-  - The NTU academic calendar (teaching week numbers), exam and class timetables, and forward-to-add (forward a group-chat message to the bot, confirm, and it becomes an event).
-  - Exam reminders, and NTU Outlook email if a connector works with NTU's tenant.
+- **Phase 6: schedule, reading and planning.**
+  - Reading the student's Google Calendar through Claude's connector: upcoming exams, what's on a day, and free time before deadlines, with proposed study blocks.
+  - Teaching week and recess from the NTU academic calendar, if the calendar doesn't already show them.
+  - Exam reminders ("Exam tomorrow", "Exam in 2 hours" with venue and what to bring), from Google Calendar's own notifications or from exams imported into the event store.
+- **Phase 7: writing with permission.**
+  - Google Calendar events for deadlines, exams and study blocks, each written only after confirmation and never duplicated.
+  - Forward-to-add: forward a group-chat message to the bot, confirm, and it becomes an event.
 - **Phase 8: stretch.** A custom Claude Code channel that pushes new announcements and moved deadlines into a running session, plus groups and sign-up sheets, module progress and a weekly review.
 - **Phase 9: share.** An install guide, a check of NTU's rules on automated access, and packaging.
 

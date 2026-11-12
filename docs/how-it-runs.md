@@ -21,6 +21,7 @@ Status: 7 Nov 2026 (Phase 3 and Phase 4 done; indexer run by hand). All times ar
 - **One at a time:** if another sync is already running (e.g. the digest's), this one skips.
 - **Log:** `.data\sync.log`
 - **If it fails** (e.g. signed out): old data is kept. After 6 hours of failed tries you get a ⚠️ sync alert (see remind). The usual failure is `Browser failed (hidden)` when it starts as the laptop leaves standby (see "When the PC is off or asleep").
+- **Sign-in retry (since 12 Nov):** if the hidden browser itself fails (`BrowserFailed`), the sync waits 1 minute and signs in once more before giving up; the log then shows `[uni_copilot.store.sync] sign-in: the browser failed; trying once more in 60 s`. Such a sync takes about 2 minutes. "You must sign in" (`LoginRequired`) is not retried.
 
 ### 2. remind: deadline reminders
 
@@ -82,7 +83,7 @@ Status: 7 Nov 2026 (Phase 3 and Phase 4 done; indexer run by hand). All times ar
 **When you open it**, two things can start the jobs again:
 
 1. **Windows' catch-up:** each task has "run as soon as possible after a missed start", so Windows starts a missed run after waking: after a longer sleep (usually your first open of the day), **5–8 minutes later** (27 Oct – 7 Nov: the sync worked 11 of 11 times); after a short standby, **in the same minute**. It can also fire twice (29 Oct: at 10:53 and again at 10:59:58). A late catch-up **takes the place of the next regular poke** (29 Oct: the 10:59:58 runs replaced remind's 11:10 and digest's 11:05).
-   - **Known weak spot:** **a sync that starts in the minute the laptop leaves standby often fails** (`Browser failed (hidden)`; 16 of 26 such runs since 28 Oct, likely because the network isn't back yet; not verified). 12 of the 16 came from opening the lid or pressing the power button. The other 34 runs all worked. Old data is kept, so right after opening the laptop the data can stay up to about 2 hours old, until the next sync. On 28 and 29 Oct Windows also cut such runs off (`0x41306`). Not fixed yet: a sign-in retry after about a minute comes with the next step.
+   - **Known weak spot:** **a sync that starts in the minute the laptop leaves standby often fails** (`Browser failed (hidden)`; 16 of 26 such runs since 28 Oct, likely because the network isn't back yet; not verified). 12 of the 16 came from opening the lid or pressing the power button. The other 34 runs all worked. Old data is kept, so right after opening the laptop the data can stay up to about 2 hours old, until the next sync. On 28 and 29 Oct Windows also cut such runs off (`0x41306`). **Since 12 Nov the sync retries the sign-in once after 1 minute** (see sync above); whether that fixes these runs is being checked in `.data\sync.log` (look for the `trying once more` line and whether the sources after it worked). Runs Windows cuts off can't be helped by a retry.
 2. **The next regular poke:** within 30 minutes for remind and digest; the next odd hour for sync.
 
 **Example: you open the laptop at 10:54 (29 Oct):**
@@ -138,7 +139,7 @@ A reminder isn't tied to an exact minute. It's **"the first remind run after the
 | PC asleep / lid closed (not set to stay on) | ✗ | ✗ | ✗ | ✗ |
 | PC on but signed out of Windows | ✗ | ✗ | ✗ | ✗ |
 | PC on, no internet | fails (data kept; ⚠️ alert after 6 h) | ✓ but can't send | can't send (retried, 3 a day) | ✗ |
-| Laptop just left standby (e.g. you opened it) | often fails (data kept; next run works) | ✓ (may fail to send; next run tries again) | ✓ | ✓ if the window is open |
+| Laptop just left standby (e.g. you opened it) | often failed before 12 Nov; now retries the sign-in after 1 min (data kept if it still fails; next run works) | ✓ (may fail to send; next run tries again) | ✓ | ✓ if the window is open |
 | NTULearn sign-in expired | fails (⚠️ alert after 6 h); fix: `login` tool at the PC | ✓ (old data) | ✓ (old data) | ✓ |
 | Claude Code updating itself (seen 29 Oct 11:00: `claude.exe` briefly missing) | ✓ | ✓ | that try fails (`couldn't start`), retried at the next poke | restart the window afterwards |
 

@@ -309,7 +309,7 @@ def _main() -> None:
     night = t0 + timedelta(hours=19)  # Wed 07:00 SGT, last success Tue 11:00, nothing failed
     show("   night gap, no failure", night)
     for s in SOURCES:
-        set_state(conn, f"last_error:{s}", "AuthError: Browser failed (hidden, Error)")
+        set_state(conn, f"last_error:{s}", "BrowserFailed: Browser failed (hidden, Error)")
     conn.commit()
     plan = show("   last attempt failed, last success 20 h ago", night)
     print(f"   alert text: {format_message(plan, night).splitlines()[0]}")
@@ -318,7 +318,7 @@ def _main() -> None:
     set_state(conn, "last_error:ntulearn_gradebook", "")
     conn.commit()
     show("   deadlines synced again, others still failing", night + timedelta(hours=1, minutes=10))
-    set_state(conn, "last_error:ntulearn_gradebook", "AuthError: Browser failed (hidden, Error)")
+    set_state(conn, "last_error:ntulearn_gradebook", "BrowserFailed: Browser failed (hidden, Error)")
     conn.commit()
     show("   deadlines fail again, 7 h later (a new streak)", night + timedelta(hours=8))
     conn.close()

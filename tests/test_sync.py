@@ -9,8 +9,10 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from types import SimpleNamespace
 
+import pytest
+
 from conftest import T0, deadline_event, post_event
-from uni_copilot.ntulearn_mcp.auth.session import LoginRequired
+from uni_copilot.ntulearn_mcp.auth.session import AuthError, BrowserFailed, LoginRequired
 from uni_copilot.ntulearn_mcp.client.http import NtuLearnError
 from uni_copilot.ntulearn_mcp.models import (
     Announcement, AnnouncementList, Deadline, DeadlineList, Message, MessageList,
@@ -18,7 +20,7 @@ from uni_copilot.ntulearn_mcp.models import (
 from uni_copilot.store.db import get_state, time_to_db
 from uni_copilot.store.events import load_events
 from uni_copilot.store.sync import (
-    EDGE_MARGIN, Clients, failed_courses, is_failure, keep_known_status, make_covers, run_sync,
+    EDGE_MARGIN, SIGN_IN_RETRY_S, Clients, failed_courses, is_failure, keep_known_status, make_covers, run_sync,
 )
 
 CODES = {"XX1001", "YY2002"}
@@ -76,7 +78,8 @@ class Fake:
     messages: list = field(default_factory=list)
     notes: dict = field(default_factory=dict)  # source name -> notes
     fail: dict = field(default_factory=dict)  # source name -> exception
-    sign_in_error: Exception | None = None
+    sign_in_errors: list = field(default_factory=list)  # raised one per sign-in, in order; then it works
+    sign_ins: int = 0  # how many times the sync tried to sign in
 
     # Builds a Clients object whose methods answer from this Fake.
     def clients(self) -> Clients:
@@ -87,10 +90,11 @@ class Fake:
             if name in fake.fail:
                 raise fake.fail[name]
 
-        # Stands in for http.ensure_signed_in.
+        # Stands in for http.ensure_signed_in: counts the try, raises the next set error if any.
         def ensure_signed_in():
-            if fake.sign_in_error:
-                raise fake.sign_in_error
+            fake.sign_ins += 1
+            if fake.sign_in_errors:
+                raise fake.sign_in_errors.pop(0)
 
         # Stands in for DeadlinesClient.upcoming.
         def upcoming(days, past_days=0, course=None):
@@ -221,11 +225,44 @@ def test_one_source_fails(db):
 # Not signed in: every source fails the same way and nothing is saved.
 def test_sign_in_failure(db):
     fake = full_fake()
-    fake.sign_in_error = LoginRequired("no session")
+    fake.sign_in_errors = [LoginRequired("no session")]
     reports = run_sync(db, fake.clients(), T0)
     assert all(not r.ok and "LoginRequired" in r.error for r in reports)
     assert load_events(db) == {}
     assert get_state(db, "last_sync:ntulearn_gradebook") is None
+
+
+# The browser failing once (after standby): wait a minute, sign in again, sync as normal.
+def test_browser_failure_is_retried_once(db):
+    fake = full_fake()
+    fake.sign_in_errors = [BrowserFailed("Browser failed (hidden, Error).")]
+    waits = []
+    reports = run_sync(db, fake.clients(), T0, sleep=waits.append)
+    assert waits == [SIGN_IN_RETRY_S] and fake.sign_ins == 2
+    assert all(r.ok for r in reports) and counts(reports) == {"new": 3}
+    assert get_state(db, "last_error:ntulearn_gradebook") == ""
+
+
+# The browser failing twice: one wait only, then every source fails as before.
+def test_browser_failure_twice_gives_up(db):
+    fake = full_fake()
+    fake.sign_in_errors = [BrowserFailed("first"), BrowserFailed("second")]
+    waits = []
+    reports = run_sync(db, fake.clients(), T0, sleep=waits.append)
+    assert waits == [SIGN_IN_RETRY_S] and fake.sign_ins == 2
+    assert all(not r.ok and r.error == "BrowserFailed: second" for r in reports)
+    assert load_events(db) == {}
+
+
+# "You must sign in" and "another program held the profile" aren't retried: waiting wouldn't help.
+@pytest.mark.parametrize("error", [LoginRequired("no session"), AuthError("profile busy")])
+def test_other_sign_in_errors_are_not_retried(db, error):
+    fake = full_fake()
+    fake.sign_in_errors = [error]
+    waits = []
+    reports = run_sync(db, fake.clients(), T0, sleep=waits.append)
+    assert waits == [] and fake.sign_ins == 1
+    assert all(not r.ok for r in reports)
 
 
 # A status that couldn't be read ("unknown") doesn't undo a known "submitted".

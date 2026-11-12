@@ -65,6 +65,10 @@ class LoginRequired(AuthError):
     """Signing in needs you (a visible window), or you didn't finish in time."""
 
 
+class BrowserFailed(AuthError):
+    """The browser itself failed (Playwright raised an error), so trying again later may work."""
+
+
 @dataclass(frozen=True)
 class LoginResult:
     cookies: RequestsCookieJar
@@ -79,6 +83,7 @@ def sign_in(allow_window: bool = False) -> LoginResult:
     Always tries a hidden browser first. If that can't finish by itself and
     allow_window is True, opens a visible window for you to sign in.
     Raises LoginRequired if a sign-in needs you but allow_window is False.
+    Raises BrowserFailed if the browser itself failed.
     Waits (up to PROFILE_WAIT_S) if another program is signing in right now.
     """
     with _browser_lock, file_lock(PROFILE_LOCK, PROFILE_WAIT_S) as got:
@@ -109,8 +114,9 @@ def cookie_summary(jar: RequestsCookieJar) -> list[str]:
         lines.append(f"{c.name} (expires: {when})")
     return lines
 
-# One complete browser run: open the profile, block non-GET API calls, go to NTULearn, wait, copy cookies, close. 
+# One complete browser run: open the profile, block non-GET API calls, go to NTULearn, wait, copy cookies, close.
 # It returns the jar, or None if it didn't get signed in. sign_in calls it once hidden, then maybe once with a window.
+# Any Playwright error (TimeoutError is one too) becomes BrowserFailed, so callers can tell it apart from "you must sign in".
 def _attempt(headless: bool, timeout_s: float) -> RequestsCookieJar | None:
     """One browser run. Returns cookies if signed in, None if not within timeout_s."""
     mode = "hidden" if headless else "window"
@@ -134,9 +140,10 @@ def _attempt(headless: bool, timeout_s: float) -> RequestsCookieJar | None:
                 context.close()
     except PlaywrightError as e:
         # Only the error type: Playwright messages can contain full URLs.
-        raise AuthError(
+        raise BrowserFailed(
             f"Browser failed ({mode}, {type(e).__name__}). "
-            "Is another program (e.g. the spike script) using .auth/profile?"
+            "Mostly seen just after the laptop leaves standby: try again in a minute. "
+            "If it keeps failing, close anything else using .auth/profile."
         ) from None
 
 

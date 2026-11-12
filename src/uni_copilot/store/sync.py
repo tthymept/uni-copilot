@@ -19,6 +19,9 @@ In plain words:
   Plus one rule about status: if NTULearn couldn't tell us a deadline's
   status this time ("unknown"), the status we already knew is kept, so a
   hiccup never shows up as "submitted -> open".
+  And one about signing in: if the hidden browser itself fails (BrowserFailed,
+  mostly in the minute the laptop leaves standby), the sync waits a minute
+  and signs in once more before giving up.
 
 What sync covers (Phase 2 decision):
   deadlines            due from 14 days ago to 120 days ahead
@@ -40,6 +43,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 
+from uni_copilot.ntulearn_mcp.auth.session import BrowserFailed
 from uni_copilot.ntulearn_mcp.client.announcements import AnnouncementsClient
 from uni_copilot.ntulearn_mcp.client.courses import CoursesClient
 from uni_copilot.ntulearn_mcp.client.deadlines import DeadlinesClient
@@ -68,6 +72,11 @@ EDGE_MARGIN = timedelta(hours=1)
 FAILURE_WORDS = ("unavailable", "couldn't be read")
 
 ERROR_MAX_CHARS = 300
+
+# How long to wait before the second sign-in when the browser failed (Phase 6
+# step 0b). Standby failures happened in the minute after waking, so one
+# minute; the digest waits up to 3 minutes for a running sync, which still fits.
+SIGN_IN_RETRY_S = 60
 
 
 # How one source went in one sync. Printed by `uni-copilot sync` (step 6).
@@ -164,8 +173,12 @@ def keep_known_status(events: list[Event], unknown_ids: set[str], stored: dict[s
 # ---------- The sync ----------
 
 # Runs one full sync and returns a report per source. `now` is the sync's
-# time stamp (every row written gets it); tests pass a fixed one.
-def run_sync(conn: sqlite3.Connection, clients: Clients | None = None, now: datetime | None = None) -> list[SourceReport]:
+# time stamp (every row written gets it); tests pass a fixed one, and a fake
+# `sleep` so the sign-in retry doesn't really wait.
+def run_sync(
+    conn: sqlite3.Connection, clients: Clients | None = None, now: datetime | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> list[SourceReport]:
     clients = clients or make_clients()
     now = now or datetime.now(timezone.utc)
     sources = ["ntulearn_gradebook", "ntulearn_announcement", "ntulearn_message"]
@@ -173,7 +186,7 @@ def run_sync(conn: sqlite3.Connection, clients: Clients | None = None, now: date
     # Sign in and read this term's course codes once. If that fails, every
     # source fails the same way: record it and stop.
     try:
-        clients.http.ensure_signed_in()
+        _sign_in_with_retry(clients.http, sleep)
         codes = {c.code for c in clients.courses.list_courses().courses}
     except Exception as e:  # noqa: BLE001 - any failure here is reported, not raised
         error = _short_error(e)
@@ -190,6 +203,20 @@ def run_sync(conn: sqlite3.Connection, clients: Clients | None = None, now: date
         _run_source(conn, "ntulearn_message", lambda: _fetch_messages(clients), "posted_at",
                     now - timedelta(days=POST_DAYS), now, codes, now),
     ]
+
+
+# Signs in. If the browser itself failed, waits SIGN_IN_RETRY_S and tries once
+# more; a second failure is raised as it is. "You must sign in" (LoginRequired)
+# and "another program held the profile" (sign_in already waited 2 minutes)
+# aren't retried: waiting wouldn't help. The warning lands in .data\sync.log,
+# so the log shows which syncs needed the second try.
+def _sign_in_with_retry(http, sleep: Callable[[float], None]) -> None:
+    try:
+        http.ensure_signed_in()
+    except BrowserFailed:
+        log.warning("sign-in: the browser failed; trying once more in %d s", SIGN_IN_RETRY_S)
+        sleep(SIGN_IN_RETRY_S)
+        http.ensure_signed_in()
 
 
 # Fetch, convert and save one source; never raises (a failure goes in the report).
