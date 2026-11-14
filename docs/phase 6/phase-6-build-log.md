@@ -127,9 +127,51 @@ feat(sync): retry the sign-in once when the browser fails
   (6 reads and plans the schedule, 7 writes with permission)
 ```
 
+### Step 0 results so far (log check, 14 Nov)
+
+From `.data\sync.log`, 12 Nov 14:48 to 14 Nov 19:26 (the first 18 syncs with the retry):
+
+- **16 worked at the first sign-in** (no retry line).
+- **2 needed the retry, and neither recovered:**
+  - **Fri 13 Nov 05:13:** the retry line, then nothing: no source lines, no `exit code`. The run was cut off during the 60 s wait (the next sync is 09:38). A retry can't help a run that is cut off.
+  - **Fri 13 Nov 21:17:** the second try failed too (`BrowserFailed` on all three sources, exit code 1). The 21:38 sync, 21 minutes later, worked.
+- So the retry runs as built, but **it hasn't rescued a sync yet (0 of 2)**. Two cases are too few to judge. Not compared with Windows' standby events yet.
+
+## Step 2: the calendar trial
+
+No code. You connected Claude's Google Calendar connector in the terminal session (`/mcp` → "claude.ai Google Calendar", 14 Nov). Shape only below: no dates, titles or ids from the calendar.
+
+### Part 1: the read-only look (14 Nov)
+
+Read with the connector's `list_calendars` and `list_events` (two weeks back, four weeks ahead). Nothing was written.
+
+- **Four calendars:** your main one, a separate school-timetable calendar, a public-holidays calendar and a club calendar. **`list_events` reads only the main calendar unless told otherwise**, so a schedule question has to ask for the timetable calendar too (by its id from `list_calendars`).
+- **Classes:** in the timetable calendar, as weekly repeating events. Title `[CODE] TYPE (COURSE NAME)` (TYPE = LEC/STUDIO, TUT, LAB), room in the location. They stop after teaching week 13. A few single classes were moved by hand (one to a different week, one to a later start), which the connector returns correctly as changed instances.
+- **Exams:** in the timetable calendar, as single events titled `[CODE] EXAM (COURSE NAME)`, with start and end times. **No venue** (location empty) and **no notification of their own** (the calendar's default only).
+- **Quizzes, presentations, personal things:** in the main calendar, typed by hand. Titles are free text and often use a short course name instead of the code; some have a location. Default notification: one pop-up 30 minutes before.
+- **Free/busy flag:** at least one test is marked "free" (the event doesn't block time). A free-time answer that trusts that flag would plan over it.
+- **Teaching weeks, recess, exam period:** not in any calendar.
+- **Time zones:** events carry mixed zone labels (an import left some as UTC), but every time comes back with the +08:00 offset and is correct in SGT.
+
+What this means for the decisions (answered after part 2):
+
+- **Decision 5 (teaching weeks):** the calendar can't answer "which week is it?"; that needs the academic calendar file and `week_info`, if wanted.
+- **Decision 6 (exam reminders):** Google gives no "exam tomorrow" today: only the default pop-up shortly before, and no venue. Either add notifications and venues to the exam events by hand, or import the exams into the store for `remind`.
+- **Decision 7 (free time):** has to read two calendars and ignore the free/busy flag; whether Claude gets it right is part 2.
+
+### Part 2: your questions
+
+Open: 4–5 real questions from you, answers checked by you.
+
+### Part 3: the Telegram session
+
+Open: whether the locked Telegram session can be allowed the connector's read tools (decision 4). Not tried.
+
 ## Open items
 
-- **Does the retry fix the standby failures? Not verified yet.** Over the next days, look in `.data\sync.log` for `trying once more` and check that the source lines after it worked. If the second try also fails often, a longer wait (or a second retry) is the next idea; if Windows cuts the run off (`0x41306`), no retry can help.
+- **The calendar trial is half done:** the look is finished; your questions and the Telegram check are open (step 2, parts 2 and 3).
+
+- **Does the retry fix the standby failures? Not so far** (0 of 2 by 14 Nov, see "Step 0 results so far"). Keep looking in `.data\sync.log` for `trying once more` and whether the source lines after it worked. If the second try also fails often, a longer wait (or a second retry) is the next idea; if Windows cuts the run off (`0x41306`), no retry can help.
 - **Likely cause of the failures is not verified:** the network not being back yet is a guess supported by one log match (2 Nov 17:56).
 - **A sign-in that fails later, in the middle of a sync** (a 401 → new sign-in inside a source), isn't retried: that source fails as before. Not seen in the log so far.
 
